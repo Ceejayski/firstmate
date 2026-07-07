@@ -107,6 +107,18 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+# Shared crewmate/scout block; not used for secondmate charters.
+# No apostrophes in this body (issue #166: heredoc inside $(...) breaks bash -n).
+FABLE_REASONING=$(cat <<EOF
+
+# Reasoning (Fable protocol)
+Read \`$DATA/fable-reasoning-protocol.md\` and follow it for non-trivial work.
+Calibrate effort to stakes before acting; verify ground truth from code, config, and logs — not memory or assumptions.
+Debug with multiple hypotheses; prefer the cheapest test that discriminates between them.
+Mark conclusions **CONFIRMED** (verified) vs **PLAUSIBLE** (not yet verified).
+EOF
+)
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -262,6 +274,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$FABLE_REASONING
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -374,6 +387,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$FABLE_REASONING
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
