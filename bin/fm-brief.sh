@@ -44,6 +44,9 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout scaffolds also include a Reasoning (Fable protocol) section
+# pointing the crewmate at data/fable-reasoning-protocol.md; secondmate
+# charters do not get this section.
 # Refuses to overwrite an existing brief.
 set -eu
 
