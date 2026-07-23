@@ -360,6 +360,24 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## Buzz fleet bridge (config/buzz-bridge.env)
+
+The Buzz fleet bridge lets a firstmate home post public-safe fleet status into a channel of a Buzz community and pull research requests back out of it; `docs/buzz-bridge.md` owns the operating guide, posting rules, and research-request convention.
+It is off unless a channel is configured, and it generates no bootstrap artifacts, watcher checks, or cadence changes: the two clients (`bin/fm-buzz-status.sh` and `bin/fm-buzz-enqueue.sh`) are invoked explicitly and are hard no-ops without a channel.
+Every key resolves as explicit environment variable first, then the gitignored `config/buzz-bridge.env`, then the home's gitignored `.env`; `FMB_ENV_FILE` can point direct invocations at another `.env`-style file in place of `config/buzz-bridge.env`.
+
+```sh
+BUZZ_BRIDGE_CHANNEL=     # channel UUID to post to and poll (from `buzz channels list`); unset means the bridge is off
+BUZZ_PRIVATE_KEY=        # Nostr key (hex or nsec) for the captain-controlled bridge identity; environment-only handoff to the buzz CLI, never printed
+BUZZ_RELAY_URL=          # optional relay base URL; unset defers to the buzz CLI default
+BUZZ_BRIDGE_DRY_RUN=     # truthy makes fm-buzz-status.sh print instead of post
+BUZZ_BRIDGE_BIN=         # optional buzz CLI executable override; tests point it at a fake
+```
+
+`bin/fm-buzz-status.sh` posts the composed snapshot or a `--text` custom line via `buzz messages send`; `--dry-run` composes and prints with no network.
+`bin/fm-buzz-enqueue.sh` reads new channel messages with `buzz messages get`, surfaces `fm research:` / `fm: scout web` requests as `buzz-research <event_id> <question>` lines, and advances the `state/buzz-bridge.cursor` high-water mark unless `--peek` is used.
+A configured channel with a missing key, CLI, or `jq` degrades to one stderr guidance line and exit 0, so a half-configured bridge never fails the fleet; only a live post that actually reached the CLI propagates a non-zero exit for caller retry.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
