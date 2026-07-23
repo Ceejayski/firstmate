@@ -67,6 +67,7 @@ make_home() {
 - [ ] task-a1 - Fix the widget flow (repo: my-repo) (kind: ship) (since 2026-07-20)
   an indented note line that must not appear
 - [ ] task-b2 - Buzz bridge phase two (repo: firstmate) (kind: ship) (since 2026-07-23)
+- [ ] task-c3 - Escalate the payment gate blocked-by: task-a1 (repo: my-repo) (kind: ship) (priority: 2) (since 2026-07-22) (hold: captain decision pending) (hold-kind: captain)
 
 ## Queued
 - [ ] task-q1 - Queued thing (repo: my-repo) (kind: ship)
@@ -121,6 +122,10 @@ grep -q '<unset>' "$TMP_ROOT/out" || fail "dry-run preview should show the chann
 grep -q 'Fix the widget flow' "$TMP_ROOT/out" || fail "dry-run snapshot missing in-flight title"
 grep -q 'https://github.com/x/y/pull/5' "$TMP_ROOT/out" || fail "dry-run snapshot missing PR URL"
 grep -q 'Shipped the thing' "$TMP_ROOT/out" || fail "dry-run snapshot missing done line"
+grep -q 'Escalate the payment gate (repo: my-repo)$' "$TMP_ROOT/out" \
+  || fail "dry-run snapshot did not strip blocked-by/priority/hold/hold-kind markers: $(cat "$TMP_ROOT/out")"
+grep -q 'priority: 2\|hold: captain\|hold-kind: captain\|blocked-by' "$TMP_ROOT/out" \
+  && fail "dry-run snapshot leaked a priority/hold/hold-kind/blocked-by marker"
 grep -q 'task-a1' "$TMP_ROOT/out" && fail "dry-run snapshot leaked an internal task id"
 grep -q 'must not appear' "$TMP_ROOT/out" && fail "dry-run snapshot leaked an indented note line"
 grep -q 'Queued thing' "$TMP_ROOT/out" && fail "dry-run snapshot included queued items"
