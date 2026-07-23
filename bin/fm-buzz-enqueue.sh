@@ -38,7 +38,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --peek) PEEK=1; shift ;;
     -h|--help)
-      sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "fm-buzz-enqueue: unknown argument: $1" >&2; exit 2 ;;
   esac
