@@ -97,9 +97,10 @@ fmb_fetch() {
 # fmb_format_entry <backlog-line> <state-dir>: print one public-safe bullet for
 # a top-level backlog entry. Drops the internal task id, any blocked-by task
 # ids and reasons, and the "(kind: ...)" / "(since ...)" / "(priority: ...)" /
-# "(hold: ...)" / "(hold-kind: ...)" markers, keeps the human title and
-# "(repo: ...)", and appends the recorded PR URL from state/<id>.meta when one
-# exists. The blocked-by/kind/since/priority/hold marker set mirrors the
+# "(hold: ...)" / "(hold-kind: ...)" / "(merged ...)" / "(reported ...)" /
+# "(done ...)" markers, keeps the human title and "(repo: ...)", and appends
+# the recorded PR URL from state/<id>.meta when one exists. The blocked-by/
+# kind/since/priority/hold/merged/reported/done marker set mirrors the
 # canonical backlog metadata stripped by fm-fleet-snapshot.sh's title_of.
 fmb_format_entry() {
   local line=$1 state_dir=$2 rest id title pr
@@ -115,6 +116,9 @@ fmb_format_entry() {
     s/ \(priority: [^)]*\)//g
     s/ \(hold: [^)]*\)//g
     s/ \(hold-kind: [^)]*\)//g
+    s/ \(merged [^)]*\)//g
+    s/ \(reported [^)]*\)//g
+    s/ \(done [^)]*\)//g
   ')
   pr=""
   case "$id" in
