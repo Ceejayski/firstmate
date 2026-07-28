@@ -96,12 +96,13 @@ fmb_fetch() {
 
 # fmb_format_entry <backlog-line> <state-dir>: print one public-safe bullet for
 # a top-level backlog entry. Drops the internal task id, any blocked-by task
-# ids and reasons, and the "(kind: ...)" / "(since ...)" / "(priority: ...)" /
+# ids and reasons, the "(kind: ...)" / "(since ...)" / "(priority: ...)" /
 # "(hold: ...)" / "(hold-kind: ...)" / "(merged ...)" / "(reported ...)" /
-# "(done ...)" markers, keeps the human title and "(repo: ...)", and appends
-# the recorded PR URL from state/<id>.meta when one exists. The blocked-by/
-# kind/since/priority/hold/merged/reported/done marker set mirrors the
-# canonical backlog metadata stripped by fm-fleet-snapshot.sh's title_of.
+# "(done ...)" markers, any trailing scout "- data/<id>/report.md" path or
+# "- local main" note, and any bare/angle-wrapped URL, keeps the human title
+# and "(repo: ...)", and appends the recorded PR URL from state/<id>.meta when
+# one exists. This marker/artifact set mirrors what fm-fleet-snapshot.sh's
+# title_of/clean_title/strip_title_artifacts strip from the canonical backlog.
 fmb_format_entry() {
   local line=$1 state_dir=$2 rest id title pr
   rest=${line#*\] }
@@ -109,8 +110,13 @@ fmb_format_entry() {
   title=${rest#"$id"}
   title=${title# - }
   title=$(printf '%s' "$title" | sed -E '
+    s#<?https?://[^[:space:])"<>]+>?##g
     s/[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$//
     s/[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+//g
+    s#[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\.md##
+    s#[[:space:]]+data/[^[:space:])]+/report\.md##
+    s/[[:space:]]+-[[:space:]]+local main//
+    s/[[:space:]]+local main//
     s/ \(kind: [^)]*\)//g
     s/ \(since [^)]*\)//g
     s/ \(priority: [^)]*\)//g
@@ -119,6 +125,7 @@ fmb_format_entry() {
     s/ \(merged [^)]*\)//g
     s/ \(reported [^)]*\)//g
     s/ \(done [^)]*\)//g
+    s/[[:space:]]+-[[:space:]]*$//
   ')
   pr=""
   case "$id" in

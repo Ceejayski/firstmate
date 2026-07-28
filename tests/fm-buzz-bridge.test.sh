@@ -74,6 +74,8 @@ make_home() {
 
 ## Done
 - [x] task-d1 - Shipped the thing (repo: my-repo) (kind: ship)
+- [x] task-d2 - Scouted the meme trend - data/task-d2/report.md (repo: my-repo) (kind: scout)
+- [x] task-d3 - Wrapped up locally - local main (repo: my-repo) (kind: ship)
 EOF
   printf 'window=fm-task-a1\npr=https://github.com/x/y/pull/5\n' > "$home/state/task-a1.meta"
 }
@@ -129,6 +131,12 @@ grep -q 'priority: 2\|hold: captain\|hold-kind: captain\|blocked-by' "$TMP_ROOT/
 grep -q 'task-a1' "$TMP_ROOT/out" && fail "dry-run snapshot leaked an internal task id"
 grep -q 'must not appear' "$TMP_ROOT/out" && fail "dry-run snapshot leaked an indented note line"
 grep -q 'Queued thing' "$TMP_ROOT/out" && fail "dry-run snapshot included queued items"
+grep -q 'Scouted the meme trend (repo: my-repo)$' "$TMP_ROOT/out" \
+  || fail "dry-run snapshot did not strip the scout report-path suffix: $(cat "$TMP_ROOT/out")"
+grep -q 'Wrapped up locally (repo: my-repo)$' "$TMP_ROOT/out" \
+  || fail "dry-run snapshot did not strip the local-main suffix: $(cat "$TMP_ROOT/out")"
+grep -q 'report.md\|task-d2\|local main' "$TMP_ROOT/out" \
+  && fail "dry-run snapshot leaked a report-path or local-main artifact: $(cat "$TMP_ROOT/out")"
 [ ! -e "$LOG1" ] || fail "dry-run invoked the buzz CLI"
 pass "dry-run previews the snapshot without any CLI call"
 
