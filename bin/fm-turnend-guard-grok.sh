@@ -12,22 +12,24 @@ PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 
 command -v jq >/dev/null 2>&1 || exit 0
-printf '%s' "$PAYLOAD" | jq --stream -se '
-  [
-    .[]
-    | select(
-        length == 2
-        and (.[0] | length) > 0
-        and (
-          .[0][0] == "sessionId"
-          or .[0][0] == "stopHookActive"
-          or .[0][0] == "stop_hook_active"
-        )
+printf '%s' "$PAYLOAD" | jq -n --stream -e '
+  reduce inputs as $item (
+    {};
+    if (
+      ($item | length) == 2
+      and ($item[0] | length) > 0
+      and (
+        $item[0][0] == "sessionId"
+        or $item[0][0] == "stopHookActive"
+        or $item[0][0] == "stop_hook_active"
       )
-    | .[0][0]
-  ]
-  | group_by(.)
-  | all(.[]; length == 1)
+    ) then
+      .[$item[0][0]] = ((.[$item[0][0]] // 0) + 1)
+    else
+      .
+    end
+  )
+  | all(.[]; . == 1)
 ' >/dev/null 2>&1 || exit 0
 CAPABILITY=$(printf '%s' "$PAYLOAD" | jq -ser '
   if length != 1 then error("payload count")
