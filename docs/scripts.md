@@ -93,3 +93,6 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+| `fm-buzz-lib.sh`         | Shared Buzz fleet-bridge config resolution, snapshot composition, and send/fetch helpers |
+| `fm-buzz-status.sh`      | Post the public-safe fleet snapshot or custom text to the configured Buzz channel     |
+| `fm-buzz-enqueue.sh`     | Poll the configured Buzz channel for research requests and surface them once each     |
