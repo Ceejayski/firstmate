@@ -659,7 +659,14 @@ test_grok_adapter_invalid_inputs_start_neither_path() {
   log="$TMP_ROOT/grok-invalid.log"
   printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
   chmod +x "$fakebin/grok"
-  for payload in '{' '{"sessionId":"x","stopHookActive":"false"}' '{"sessionId":"x","stop_hook_active":1}'; do
+  for payload in \
+    ' ' \
+    '{' \
+    '{"sessionId":"x","stopHookActive":"false"}' \
+    '{"sessionId":"x","stop_hook_active":1}' \
+    '{"sessionId":"x"}{"sessionId":"y"}' \
+    '{"sessionId":"x","stopHookActive":false}{"sessionId":"y","stopHookActive":false}'
+  do
     out=$(printf '%s' "$payload" | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
     expect_code 0 "$status" "invalid Grok payload must conservatively allow without choosing a path"
     [ -z "$out" ] || fail "invalid Grok payload produced output: $out"

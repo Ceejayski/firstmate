@@ -12,13 +12,16 @@ PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 
 command -v jq >/dev/null 2>&1 || exit 0
-CAPABILITY=$(printf '%s' "$PAYLOAD" | jq -er '
-  if type != "object" then error("payload")
-  elif has("stopHookActive") then
-    if ((.stopHookActive | type) == "boolean") then "native" else error("stopHookActive") end
-  elif has("stop_hook_active") then
-    if ((.stop_hook_active | type) == "boolean") then "native" else error("stop_hook_active") end
-  else "legacy"
+CAPABILITY=$(printf '%s' "$PAYLOAD" | jq -ser '
+  if length != 1 then error("payload count")
+  elif ((.[0] | type) != "object") then error("payload")
+  else .[0] |
+    if has("stopHookActive") then
+      if ((.stopHookActive | type) == "boolean") then "native" else error("stopHookActive") end
+    elif has("stop_hook_active") then
+      if ((.stop_hook_active | type) == "boolean") then "native" else error("stop_hook_active") end
+    else "legacy"
+    end
   end
 ' 2>/dev/null) || exit 0
 
