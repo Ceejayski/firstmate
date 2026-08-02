@@ -68,6 +68,12 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep 'Never use `git stash` or any of its subcommands in this worktree.' "$brief" \
+      "$id: ship brief missing the shared-stash prohibition"
+    assert_grep 'Linked worktrees share the clone-wide `refs/stash`' "$brief" \
+      "$id: ship brief missing the shared-stash hazard rationale"
+    assert_grep 'Use scratch commits or a temporary branch instead.' "$brief" \
+      "$id: ship brief missing safe stash alternatives"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -371,6 +377,12 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+  assert_grep 'Never use `git stash` or any of its subcommands in this worktree.' "$brief" \
+    "scout brief missing the shared-stash prohibition"
+  assert_grep 'Linked worktrees share the clone-wide `refs/stash`' "$brief" \
+    "scout brief missing the shared-stash hazard rationale"
+  assert_grep 'Use scratch commits or a temporary branch instead.' "$brief" \
+    "scout brief missing safe stash alternatives"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
