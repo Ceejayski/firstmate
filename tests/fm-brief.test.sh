@@ -2,13 +2,10 @@
 # Behavior tests for bin/fm-brief.sh.
 #
 # Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# #166): Bash's lexer tracks quote state through a heredoc body while it scans
+# for the matching `)` of a command substitution, so a normal apostrophe in
+# brief prose can break parsing of the entire rest of the script.
+# Fragment heredocs must not be nested in command substitutions.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -18,9 +15,8 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# The script itself must always parse even though shared and ship-only fragment
+# heredocs deliberately contain apostrophes.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -96,27 +92,33 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
-# Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
-# reference must render as plain prose with no dangling apostrophe artifact.
-test_no_mistakes_dod_wording() {
-  local home id brief
+# Pin the original failure mode in ship prose and the same failure class in the
+# shared ship/scout prose. Both apostrophes must render literally.
+test_apostrophes_render_in_ship_and_scout_briefs() {
+  local home id brief scout
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
-    "no-mistakes DOD lost its guidance-reference sentence"
+  assert_grep "no-mistakes' own guidance" "$brief" \
+    "no-mistakes DOD mangled its apostrophe"
+  assert_grep "don't treat memory or assumptions as ground truth" "$brief" \
+    "ship brief mangled the shared-prose apostrophe"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`no-mistakes axi run --help`' "$brief" \
     "no-mistakes DOD must render literal backticks around the help command"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_no_grep "no-mistakes' own guidance" "$brief" \
-    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-wording-scout-b2 some-proj --scout >/dev/null 2>&1
+  scout="$home/data/brief-wording-scout-b2/brief.md"
+  assert_present "$scout" "scout brief was not scaffolded"
+  assert_grep "don't treat memory or assumptions as ground truth" "$scout" \
+    "scout brief mangled the shared-prose apostrophe"
+  pass "fm-brief.sh: apostrophes render intact in ship and scout briefs"
 }
 
 test_ship_project_memory_wording() {
@@ -386,7 +388,7 @@ test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
-test_no_mistakes_dod_wording
+test_apostrophes_render_in_ship_and_scout_briefs
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
