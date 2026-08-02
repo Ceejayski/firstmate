@@ -471,11 +471,8 @@ test_watch_restart_reports_healthy_peer_without_attaching() {
   touch "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=4 "$WATCH_ARM" --restart > "$out" &
   armpid=$!
-  # The restart path always burns a fixed ~5s waiting out the TERM-resistant
-  # peer's kill-wait loop before it can even start confirming, so give this a
-  # generous ceiling above that floor rather than the tight budget used by
-  # tests whose peer actually honors SIGTERM; this is timing headroom only,
-  # not a change to the liveness contract itself.
+  # The restart path waits out the TERM-resistant peer's kill-wait loop before
+  # it can confirm the survivor, so leave timing headroom above that fixed wait.
   wait_for_exit "$armpid" 200
   status=$?
   [ "$status" -eq 0 ] || fail "restart did not exit zero after reporting healthy peer (status $status): $(cat "$out")"
@@ -484,11 +481,7 @@ test_watch_restart_reports_healthy_peer_without_attaching() {
   is_live_non_zombie "$peer" || fail "restart killed a TERM-resistant peer unexpectedly"
   kill -KILL "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
-  wait_for_exit "$armpid" 80
-  status=$?
-  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "restart arm did not fail after its attached peer ended without a successor (status $status)"
-  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$out" || fail "restart arm did not surface the attached cycle end"
-  pass "watch restart attaches to a verified healthy peer and later surfaces a successor gap"
+  pass "watch restart reports a verified healthy peer without attaching"
 }
 
 test_watcher_self_evicts_on_lock_takeover() {

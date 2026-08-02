@@ -28,6 +28,8 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   watcher: healthy pid=<N> (beacon <age>s)             - --restart found its signaled peer still
+#                                                          live+fresh and returned without attaching
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -235,6 +237,12 @@ report_attached() {
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
+report_healthy() {
+  local age
+  age=$(fm_path_age "$BEAT")
+  echo "watcher: healthy pid=$HEALTHY_PID (beacon ${age}s)"
+}
+
 # Give a successor the same bounded confirmation window used for a fresh child.
 # Adapter-owned continuations normally win immediately, but the bound avoids a
 # false failure when process-close delivery and lock publication cross briefly.
@@ -339,6 +347,14 @@ if [ "$mode" = restart ]; then
         sleep 0.1
         i=$((i + 1))
       done
+      # A TERM-resistant peer still owns this home's singleton. Restart cannot
+      # honestly replace it, and attaching would turn this one-shot restart
+      # request into a long-lived wait. Report the verified healthy holder and
+      # return successfully without forking or attaching.
+      if fm_pid_alive "$lock_pid" && healthy_watcher && [ "$HEALTHY_PID" = "$lock_pid" ]; then
+        report_healthy
+        exit 0
+      fi
     else
       clear_stale_recorded_watcher_lock
     fi
