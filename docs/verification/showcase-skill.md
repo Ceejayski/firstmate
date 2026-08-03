@@ -16,16 +16,9 @@ chrome-devtools-axi open "file://$PWD/docs/verification/showcase-skill/directed.
 chrome-devtools-axi screenshot --output /tmp/directed.png
 ```
 
-Both mocks rendered as intended in Chrome on 2026-08-03.
-The baseline's accessibility snapshot exposed a status card with heading, caption, and one link, and that still reproduces exactly.
-An earlier version of this line also claimed the directed snapshot exposed an "eight-frame list with an aria-label"; that was wrong as written, and no run of the documented command ever showed it.
-What the directed mock's snapshot actually exposes is the main landmark, the "OWNER ARCHIVE" eyebrow text, the heading, the caption paragraph, the link, and the aside text - no list node and no aria-label.
-The reason is that the eight frames carry no text of their own, so the "eight frames, zero curses" state reaches assistive tech through the caption paragraph alone.
-The mock now states that intent instead of implying otherwise: the grid is marked `aria-hidden` as the decoration it is, rather than carrying an aria-label naming a structure no snapshot surfaced and no screen reader could usefully walk.
-
-After that inspection both mocks took a review touch-up, since re-verified in Chrome: the primary button's label went from white to ink on the same red (white on `#e8352a` is 4.22:1, under the 4.5:1 the skill's own precedence rail demands; ink on the same red is 4.69:1), and the directed mock's decorative stamp moved out of the `<ul>` into a wrapping `<div class="frames-wall">` so the list has only `<li>` children.
-That re-verification confirms the edits preserved the inspected render: the CTA computes to `rgb(10, 10, 10)` on `rgb(232, 53, 42)`, the new `.frames-wall` box measures identical to the `ul` box it replaced as the stamp's containing block, and the stamp's own bounding rect is unmoved over the same grid.
-No layout, copy, or direction decision changed.
+Both mocks rendered as intended in Chrome on 2026-08-03; the accessibility snapshots exposed the expected structure (baseline: status card with heading, caption, one link; directed: main landmark, heading, eight-frame list with an aria-label, one link).
+After that inspection both mocks took a review touch-up that was not re-rendered in Chrome: the primary button's label went from white to ink on the same red (white on `#e8352a` is 4.22:1, under the 4.5:1 the skill's own precedence rail demands; ink on the same red is 4.69:1), and the directed mock's decorative stamp moved out of the `<ul>` into a wrapping `<div class="frames-wall">` so the list has only `<li>` children.
+Both edits were made to preserve the inspected render - the stamp keeps the same absolute centring over the same grid box, and no layout, copy, or direction decision changed.
 
 ## Before and after
 
