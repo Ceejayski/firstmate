@@ -40,8 +40,9 @@
     font-size: clamp(40px, 7vw, 72px); margin: 10px 0 6px;
   }
   .sub { font-size: 18px; color: var(--fg-dim); max-width: 46ch; }
+  .frames-wall { position: relative; margin-top: 36px; }
   .frames {
-    position: relative; margin-top: 36px; display: grid; gap: 18px;
+    display: grid; gap: 18px;
     grid-template-columns: repeat(4, 1fr); list-style: none; padding: 0;
   }
   .frame {
@@ -77,7 +78,7 @@
   }
   .actions { margin-top: 36px; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
   .cta {
-    display: inline-block; background: var(--primary); color: #fff;
+    display: inline-block; background: var(--primary); color: var(--ink);
     font-family: var(--hand); font-weight: 800; font-size: 17px;
     text-transform: uppercase; letter-spacing: 0.06em; padding: 12px 22px;
     border: 3px solid var(--ink); text-decoration: none;
@@ -93,19 +94,21 @@
     <p class="eyebrow">Owner archive</p>
     <h1>The wall is up.</h1>
     <p class="sub">Eight frames, zero curses. Everything you make gets taped here, newest first, until it rots.</p>
-    <ul class="frames" aria-label="Empty archive wall, eight waiting frames">
-      <li class="frame" style="--tilt:-0.8deg">
-        <span class="reserved-note" aria-hidden="true">reserved for your first curse</span>
-      </li>
-      <li class="frame" style="--tilt:0.55deg"></li>
-      <li class="frame" style="--tilt:-0.35deg"></li>
-      <li class="frame" style="--tilt:0.75deg"></li>
-      <li class="frame" style="--tilt:0.4deg"></li>
-      <li class="frame" style="--tilt:-0.6deg"></li>
-      <li class="frame" style="--tilt:0.7deg"></li>
-      <li class="frame" style="--tilt:-0.45deg"></li>
+    <div class="frames-wall">
+      <ul class="frames" aria-hidden="true">
+        <li class="frame" style="--tilt:-0.8deg">
+          <span class="reserved-note" aria-hidden="true">reserved for your first curse</span>
+        </li>
+        <li class="frame" style="--tilt:0.55deg"></li>
+        <li class="frame" style="--tilt:-0.35deg"></li>
+        <li class="frame" style="--tilt:0.75deg"></li>
+        <li class="frame" style="--tilt:0.4deg"></li>
+        <li class="frame" style="--tilt:-0.6deg"></li>
+        <li class="frame" style="--tilt:0.7deg"></li>
+        <li class="frame" style="--tilt:-0.45deg"></li>
+      </ul>
       <span class="stamp" aria-hidden="true">NO CURSES YET</span>
-    </ul>
+    </div>
     <div class="actions">
       <a class="cta" href="#make">Make the first one</a>
       <p class="aside">Reading the wall never signs a transaction.</p>

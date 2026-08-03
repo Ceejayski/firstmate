@@ -16,7 +16,16 @@ chrome-devtools-axi open "file://$PWD/docs/verification/showcase-skill/directed.
 chrome-devtools-axi screenshot --output /tmp/directed.png
 ```
 
-Both mocks rendered as intended in Chrome on 2026-08-03; the accessibility snapshots exposed the expected structure (baseline: status card with heading, caption, one link; directed: main landmark, heading, eight-frame list with an aria-label, one link).
+Both mocks rendered as intended in Chrome on 2026-08-03.
+The baseline's accessibility snapshot exposed a status card with heading, caption, and one link, and that still reproduces exactly.
+An earlier version of this line also claimed the directed snapshot exposed an "eight-frame list with an aria-label"; that was wrong as written, and no run of the documented command ever showed it.
+What the directed mock's snapshot actually exposes is the main landmark, the "OWNER ARCHIVE" eyebrow text, the heading, the caption paragraph, the link, and the aside text - no list node and no aria-label.
+The reason is that the eight frames carry no text of their own, so the "eight frames, zero curses" state reaches assistive tech through the caption paragraph alone.
+The mock now states that intent instead of implying otherwise: the grid is marked `aria-hidden` as the decoration it is, rather than carrying an aria-label naming a structure no snapshot surfaced and no screen reader could usefully walk.
+
+After that inspection both mocks took a review touch-up, since re-verified in Chrome: the primary button's label went from white to ink on the same red (white on `#e8352a` is 4.22:1, under the 4.5:1 the skill's own precedence rail demands; ink on the same red is 4.69:1), and the directed mock's decorative stamp moved out of the `<ul>` into a wrapping `<div class="frames-wall">` so the list has only `<li>` children.
+That re-verification confirms the edits preserved the inspected render: the CTA computes to `rgb(10, 10, 10)` on `rgb(232, 53, 42)`, the new `.frames-wall` box measures identical to the `ul` box it replaced as the stamp's containing block, and the stamp's own bounding rect is unmoved over the same grid.
+No layout, copy, or direction decision changed.
 
 ## Before and after
 
@@ -39,6 +48,12 @@ The delta is structural, not cosmetic: different layout, different information d
 5. Copy voice is in-world and unapologetic: "curse", "rot", "cooking", never SaaS-neutral (shipped archive page copy).
 6. This project would never: soft gradients, glassmorphism, polite gray minimalism, or apology copy.
 
+**Thesis (step 2), committed before any markup was written and carried in the directed mock's header comment:**
+
+Thesis: an empty gallery wall with paper squares already taped up - emptiness rendered as reserved space, not absence.
+This is not: a sad-face apology; not a dashboard placeholder card; not a mascot cartoon doing the work the user's gens should do.
+Falsifiability check: the opposite ("a quiet apology that gets out of the way until there is something to show") is a brief a reasonable person could write, so the thesis is a real commitment rather than a compliment.
+
 **Directions considered (step 3), with the distinctness checks applied:**
 
 - A - "the first page of a fresh sketchbook": quiet and intimate; dominant element is one large empty hand-inked frame with a pencil scrawl inside; cites the paper tokens.
@@ -52,6 +67,19 @@ Stolen from a loser: A's handwritten scrawl tone for the caption; C's mascot was
 
 **Showcase test (step 4):** the baseline fails "would I open the demo with this?" - it is the empty state every product has.
 The directed version's named star is the stamped vacant wall; the heading and CTA were kept quieter so the wall stays the only star.
+
+**Anti-generic sweep (step 5), run over the DIRECTED mock, one verdict per tripwire item:**
+
+1. Centred hero with a gradient blob or glow - absent; there is no gradient anywhere and every shadow is a hard offset, per the token file's "NO soft glow" comment.
+2. Three equal feature cards in a row - absent; the eight equal frames are the direction's dominant element (a wall of waiting slots), not a card row standing in for content.
+3. Emoji or stock iconography as identity - absent; the baseline's circled framed-picture emoji was cut and nothing replaced it.
+4. Same border radius and same soft shadow everywhere - present as a cited choice: the wobble radius `14px 5px 16px 6px / 6px 15px 5px 17px` repeats on the frames and the CTA because it is the documented signature token, and the shadows are hard offsets rather than the soft drop the item warns about.
+5. Gray-on-white "clean" with one accent doing all the work - absent; the palette is ink and paper, and the red does structural work as stamp, border, and shadow ink rather than as a lone highlight.
+6. One section rhythm repeated - absent; the surface runs eyebrow, marker heading, one caption, the grid, then an actions row, and never repeats a block.
+7. Marketing verbs - absent; the copy is "The wall is up.", "Eight frames, zero curses", "until it rots", "Make the first one", none of them from the unlock/empower/seamless family.
+8. Default sans-serif because it was already there - absent; the marker and hand faces come from the typography DNA, and the fallback stacks exist only because a standalone mock cannot load the site's self-hosted woff2.
+
+Sweep result: one hit, re-committed in one line rather than replaced, which is the outcome the step allows.
 
 **Surprise budget (step 6):** exactly one - slot 1 carries a taped paper note reading "reserved for your first curse" that straightens on hover.
 It is flagged in the mock's header comment with a one-line removal instruction (delete the `.reserved-note` block and its element), touches no scope or contract, and respects reduced-motion.
