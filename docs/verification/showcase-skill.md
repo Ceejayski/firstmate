@@ -16,13 +16,19 @@ chrome-devtools-axi open "file://$PWD/docs/verification/showcase-skill/directed.
 chrome-devtools-axi screenshot --output /tmp/directed.png
 ```
 
-Both mocks rendered as intended in Chrome on 2026-08-03; the accessibility snapshots exposed the expected structure (baseline: status card with heading, caption, one link; directed: main landmark, heading, eight-frame list with an aria-label, one link).
-After that inspection both mocks took a review touch-up that was not re-rendered in Chrome: the primary button's label went from white to ink on the same red (white on `#e8352a` is 4.22:1, under the 4.5:1 the skill's own precedence rail demands; ink on the same red is 4.69:1), and the directed mock's decorative stamp moved out of the `<ul>` into a wrapping `<div class="frames-wall">` so the list has only `<li>` children.
-Both edits were made to preserve the inspected render - the stamp keeps the same absolute centring over the same grid box, and no layout, copy, or direction decision changed.
+Both committed mocks render as intended in Chrome, last confirmed on 2026-08-03.
+
+The baseline's accessibility snapshot exposes a status card with heading, caption, and one link.
+The directed mock's snapshot exposes the main landmark, the "OWNER ARCHIVE" eyebrow text, the heading, the caption paragraph, the link, and the aside text - no list node and no aria-label.
+That is deliberate: the eight frames carry no text of their own, so the "eight frames, zero curses" state reaches assistive tech through the caption paragraph alone, and the grid is marked `aria-hidden` as the decoration it is rather than carrying an aria-label naming a structure no screen reader could usefully walk.
+For the same reason the decorative stamp sits in a wrapping `<div class="frames-wall">` rather than inside the `<ul>`, so the list has only `<li>` children.
+
+Both mocks label the primary button in ink rather than white, because white on `#e8352a` is 4.22:1, under the 4.5:1 the skill's own precedence rail demands, while ink on the same red is 4.69:1.
+Chrome confirms the rendered values: the CTA computes to `rgb(10, 10, 10)` on `rgb(232, 53, 42)`.
 
 ## Before and after
 
-- Before: [`showcase-skill/baseline.html`](showcase-skill/baseline.html) - a centred raised card, circled emoji icon, "No generations yet", apologetic caption, one rounded button with a soft shadow.
+- Before: [`showcase-skill/baseline.html`](showcase-skill/baseline.html) - a centred card raised by a soft drop shadow, circled emoji icon, "No generations yet", apologetic caption, one rounded button.
   It uses the project's exact palette tokens and is competently built, which is the point: palette adherence alone did not prevent the canonical empty-state template.
   Four items on the skill's anti-generic tripwire list appear unexamined (centred card, icon-as-identity, uniform radius, soft shadow), and the project's own token file literally carries a "NO soft glow" comment the baseline violates.
 - After: [`showcase-skill/directed.html`](showcase-skill/directed.html) - the picked direction below: a vacant gallery wall of eight taped, tilted, dashed frames under a rotated red "NO CURSES YET" stamp, marker-face heading "The wall is up.", hard offset shadows, and a flagged one-item surprise.
