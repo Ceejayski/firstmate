@@ -1,0 +1,80 @@
+# Verification: the showcase skill changes what an agent produces
+
+This record verifies that [`skills/showcase/SKILL.md`](../../skills/showcase/SKILL.md) is operational rather than exhortative: the same task, run without and then with the skill's protocol, produced materially different output, and every skill step left the checkable artifact it demands.
+
+- Date: 2026-08-03.
+- Skill version: the copy committed alongside this record.
+- Task used: design the "wallet connected, zero server generations" empty state for a live project's archive page (the `/gens` route of a registered meme-generator site project).
+- Method: author the baseline first, honestly, as the fast-and-safe version an agent produces with the project's palette but no direction protocol; then run the skill's steps 1-7 literally and record each artifact below; render both as standalone mocks and inspect them in a real browser.
+
+## Exact commands
+
+```sh
+chrome-devtools-axi open "file://$PWD/docs/verification/showcase-skill/baseline.html"
+chrome-devtools-axi screenshot --output /tmp/baseline.png
+chrome-devtools-axi open "file://$PWD/docs/verification/showcase-skill/directed.html"
+chrome-devtools-axi screenshot --output /tmp/directed.png
+```
+
+Both mocks rendered as intended in Chrome on 2026-08-03; the accessibility snapshots exposed the expected structure (baseline: status card with heading, caption, one link; directed: main landmark, heading, eight-frame list with an aria-label, one link).
+
+## Before and after
+
+- Before: [`showcase-skill/baseline.html`](showcase-skill/baseline.html) - a centred raised card, circled emoji icon, "No generations yet", apologetic caption, one rounded button with a soft shadow.
+  It uses the project's exact palette tokens and is competently built, which is the point: palette adherence alone did not prevent the canonical empty-state template.
+  Four items on the skill's anti-generic tripwire list appear unexamined (centred card, icon-as-identity, uniform radius, soft shadow), and the project's own token file literally carries a "NO soft glow" comment the baseline violates.
+- After: [`showcase-skill/directed.html`](showcase-skill/directed.html) - the picked direction below: a vacant gallery wall of eight taped, tilted, dashed frames under a rotated red "NO CURSES YET" stamp, marker-face heading "The wall is up.", hard offset shadows, and a flagged one-item surprise.
+  Emptiness is rendered as reserved space rather than absence, and the ghost wall prefigures the exact grid the page grows into.
+
+The delta is structural, not cosmetic: different layout, different information design, different copy voice, different emotional read - produced by the protocol, since the same author wrote both files in the same hour.
+
+## The skill-run artifacts
+
+**DNA note (step 1), all facts cited from the project's own sources:**
+
+1. Hand-drawn faces sitewide: marker display plus handwriting body, template sans retired (design-token doc, typography block; token CSS `--font-hand` comment).
+2. Hard offset "sticker" shadows only, explicitly "NO soft glow/halo on brand art" (token CSS `--shadow` comment).
+3. Wobble border radii as a signature, for example `14px 5px 16px 6px / 6px 15px 5px 17px` (design-token doc, rounded block).
+4. Red stamp, taped paper, and dashed-border vocabulary throughout the approved hero reference (project gold sample: rotated "CURSED" stamp, dashed contract panel, speech bubble).
+5. Copy voice is in-world and unapologetic: "curse", "rot", "cooking", never SaaS-neutral (shipped archive page copy).
+6. This project would never: soft gradients, glassmorphism, polite gray minimalism, or apology copy.
+
+**Directions considered (step 3), with the distinctness checks applied:**
+
+- A - "the first page of a fresh sketchbook": quiet and intimate; dominant element is one large empty hand-inked frame with a pencil scrawl inside; cites the paper tokens.
+- B - "wall of fame, currently vacant": loud and monumental; dominant element is the vacant stamped wall of waiting frames; cites the gold sample's stamp and tape vocabulary.
+- C - "the spider is waiting": kinetic and character-led; dominant element is the mascot dangling into the empty space with a speech-bubble dare; cites the hero mascot reference.
+
+Axis check: A/B sit on quiet/monumental, B/C on object-led/character-led, A/C on still/kinetic.
+Swap test: A is defined by a single frame object, B by repeated ghost slots, C by an actor - each survives a font-and-palette swap as itself.
+Pick: B, because it does double duty the others cannot: it previews the archive's future form (the shipped page's own contact-sheet framing) while making emptiness read as potential, and it gives the CTA a diegetic job ("make the first one" fills a visible slot).
+Stolen from a loser: A's handwritten scrawl tone for the caption; C's mascot was deliberately not stolen, one theft is the limit.
+
+**Showcase test (step 4):** the baseline fails "would I open the demo with this?" - it is the empty state every product has.
+The directed version's named star is the stamped vacant wall; the heading and CTA were kept quieter so the wall stays the only star.
+
+**Surprise budget (step 6):** exactly one - slot 1 carries a taped paper note reading "reserved for your first curse" that straightens on hover.
+It is flagged in the mock's header comment with a one-line removal instruction (delete the `.reserved-note` block and its element), touches no scope or contract, and respects reduced-motion.
+
+**Cut log (step 7):** cut a planned third row of ghost frames (two rows already read as a wall); cut a "how it works" caption that duplicated the make-page's job; cut the mascot from direction B (it belongs to direction C and would have been blending).
+
+## Honest limitations
+
+- Three directions from one model are narrower than three directions from three people.
+  The axis and swap tests catch collapse into one idea, but they cannot manufacture range the author does not have.
+- The skill makes commitment cheap, which also makes a wrong commitment more decisive.
+  Direction B leans on the red-stamp motif from one gold sample; if the project ever retires that motif, this process would have confidently shipped an outdated read.
+  The only guard is that every DNA fact is cited, so a reviewer can see exactly which source a direction stands on and challenge it.
+- It did not help where a design-first process already ran: the shipped archive page carries its own thesis header from a prior wireframe-driven redesign, and the full protocol there would mostly re-derive existing decisions.
+  Compact mode is the right dose on such surfaces, and an agent may misjudge which mode a task deserves.
+- The anti-generic tripwire list is web-UI-weighted; for copy, decks, or CLI output the agent must generalize it, which is exactly the kind of judgment the list was written to avoid relying on.
+- The skill cannot tell whether the surprise lands as delight or as noise; that remains a human read on the flagged, cheap-to-reject artifact.
+- Cost is real: the full protocol adds a DNA read, three written directions, and a note to every surface-scale task.
+  That is the price of the deliverable being worth showing off, but it is the wrong price for a checkbox fix.
+
+## How a task invokes it
+
+The skill is public and standalone: install it into a project like any installer-facing skill, or point an agent at `skills/showcase/SKILL.md` directly.
+For fleet work, the task instructions author adds one line to design-flavored task instructions, for example: "Before any design or creative decision, read and follow skills/showcase/SKILL.md and keep its direction note in the PR description."
+No scaffold automation was added, deliberately: the brief scaffolder's repo argument is a caller-supplied string with no reliable signal that a task is design-flavored (the same reason the coding-guidelines skill is added to briefs by hand), so a keyword heuristic would misfire in both directions.
+If design-heavy briefs become frequent, a `--design` scaffold flag that injects the load line is the smallest honest wiring; propose it then, not now.

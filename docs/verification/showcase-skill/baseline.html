@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Baseline: /gens empty state (no skill)</title>
+<style>
+  /* Honest baseline: what a competent, fast, safe agent produced for the
+     "wallet connected, zero server gens" empty state WITHOUT the showcase
+     skill. It uses the project's palette tokens (an in-repo agent would),
+     but every structural decision is the canonical empty-state template. */
+  :root {
+    --bg: #0b0a09; --bg-raised: #131110; --fg: #f4f1e8;
+    --fg-dim: rgba(244, 241, 232, 0.75); --primary: #e8352a;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    min-height: 100svh; display: grid; place-items: center; padding: 40px;
+  }
+  .empty {
+    max-width: 420px; text-align: center; padding: 48px 32px;
+    background: var(--bg-raised); border: 1px solid rgba(244,241,232,0.15);
+    border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  }
+  .icon {
+    width: 64px; height: 64px; margin: 0 auto 20px; border-radius: 50%;
+    background: rgba(244,241,232,0.08); display: grid; place-items: center;
+    font-size: 28px;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+  p { font-size: 14px; line-height: 1.5; color: var(--fg-dim); margin-bottom: 24px; }
+  .cta {
+    display: inline-block; background: var(--primary); color: #fff;
+    font-size: 14px; font-weight: 600; padding: 10px 20px;
+    border-radius: 8px; text-decoration: none;
+  }
+</style>
+</head>
+<body>
+  <div class="empty" role="status">
+    <div class="icon" aria-hidden="true">🖼️</div>
+    <h1>No generations yet</h1>
+    <p>Your generated images will appear here once you create them.</p>
+    <a class="cta" href="#make">Create your first generation</a>
+  </div>
+</body>
+</html>
