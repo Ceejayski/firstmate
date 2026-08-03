@@ -117,5 +117,8 @@ Neither replaces the other: direction without execution is a sketch, and executi
 
 ## Compact mode for small decisions
 
-For a single component, copy string, empty state, or similar in-scope decision, skip the three directions and keep the rest: one DNA citation, the showcase test, the anti-generic check, and one line in the direction note.
+For a single component, copy string, empty state, or similar in-scope decision, run the reduced protocol below.
+Drop the three directions (section 3), the surprise budget (section 6), and the cut log (section 7).
+Keep one DNA citation (section 1), the showcase test (section 4), the anti-generic sweep (section 5), and one line in the direction note.
+The surprise budget is a per-deliverable obligation and never a per-decision one, so a trivial in-scope edit owes zero surprises.
 If a "small" decision turns out to set the direction for a whole surface, stop and run the full protocol.
