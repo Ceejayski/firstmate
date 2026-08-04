@@ -312,6 +312,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/showcase-skill.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/supervision.md",
       "audience": "maintainer-verification"
     },
@@ -326,6 +330,10 @@
     {
       "path": "docs/zellij-backend.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "skills/showcase/SKILL.md",
+      "audience": "public-product"
     },
     {
       "path": "skills/stow/SKILL.md",
