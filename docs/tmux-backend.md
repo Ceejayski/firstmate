@@ -63,6 +63,10 @@ Rendered busy detection is also harness-scoped.
 Task metadata selects only that harness's verified signature, so output from one harness cannot make another harness appear busy.
 The exact selection contract and safety rationale live in [architecture](architecture.md#runtime-session-backends), while the signatures live in [the harness-adapters skill](../.agents/skills/harness-adapters/SKILL.md).
 
+Empty-composer matching is harness-scoped too, but only for a harness that registers an idle placeholder.
+A harness that renders its placeholder without ghost styling would otherwise read as pending input forever, so `fm-send` declares the recorded harness and this backend supplies that harness's registered placeholder to submit-verification.
+Every other adapter keeps the reading it already had, and an operator's own `FM_COMPOSER_IDLE_RE` still wins; the registered placeholders live in [the harness-adapters skill](../.agents/skills/harness-adapters/SKILL.md).
+
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message once and retries Enter only until the composer clears.
 Only a proven empty composer is a positive delivery acknowledgement.
@@ -84,6 +88,7 @@ Ambiguous pending text never receives the busy-queue conversion.
 tests/fm-backend-tmux-smoke.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
+tests/fm-qwen-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-bootstrap.test.sh
 ```
