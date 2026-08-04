@@ -59,7 +59,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|qwen)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -107,6 +107,11 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# qwen uses a firstmate-owned Qwen extension under ${QWEN_HOME:-$HOME/.qwen}/extensions,
+# a private token registry beside it, plus a gitignored .fm-qwen-turnend worktree
+# pointer and a state token. A qwen spawn also writes a gitignored per-worktree
+# .qwen/settings.json that suppresses Qwen's blocking built-in-provider-update
+# prompt, with a bounded launch-time dismissal gate as the backstop.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -389,7 +394,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|qwen)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -455,6 +460,20 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # qwen (Qwen Code): -i runs the prompt and STAYS interactive, which is the
+    # supervised-crewmate shape (-p is one-shot and exits). --yolo auto-approves
+    # every tool call (verified: the crewmate reads, writes, and runs shell
+    # commands with no permission gate, and the footer reads "YOLO mode"); it is
+    # absent from `qwen --help` but is a real, non-hidden yargs option.
+    # QWEN_CODE_SUPPRESS_YOLO_WARNING silences the sandbox-less stderr warning
+    # that would otherwise be the pane's first line.
+    # --fallback-model exists and would auto-retry a capacity error on another
+    # model, but it is deliberately NOT passed: firstmate dispatches one concrete
+    # profile, and a silent model swap would make the recorded model wrong.
+    # qwen's turn-end signal does NOT ride the launch command - it is a Stop hook
+    # installed below (firstmate-owned extension + per-task pointer), so the
+    # template is identical for ship/scout/secondmate.
+    qwen) printf '%s' 'QWEN_CODE_SUPPRESS_YOLO_WARNING=1 qwen --yolo __MODELFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -578,7 +597,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|qwen)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -621,7 +640,9 @@ effort_flag_for_harness() {
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
+    # task metadata but never reaches the launch command. qwen is the same: its
+    # only --effort option belongs to the `qwen review` subcommand, not to the
+    # interactive launch, so the axis is recorded and omitted.
   esac
 }
 
@@ -1191,6 +1212,36 @@ kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
+# BACKSTOP for qwen's blocking "Built-in Provider Update" prompt. The primary
+# defense is the per-worktree settings file written with the turn-end hook above,
+# which stops the prompt from ever being raised. This gate covers the cases that
+# file cannot reach: a worktree that already had its own .qwen/settings.json, a
+# secondmate launch (which installs no per-task hook material at all), and a
+# captain who enabled folder trust for an untrusted worktree (which makes qwen
+# discard workspace settings entirely).
+# Escape answers "Remind me later", which writes nothing and lets the brief run.
+# The Escape is strictly gated on seeing the prompt's own title, because a blind
+# Escape on an already-working pane would cancel the crewmate's first turn. That
+# title is localized, so this is a backstop and never the primary defense.
+# Absence of the prompt is the normal, expected case and is never an error.
+qwen_dismiss_startup_prompt() {
+  local pane i=0 max=${FM_QWEN_STARTUP_POLLS:-40} interval=${FM_QWEN_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
+    if printf '%s\n' "$pane" | grep -Fq 'Built-in Provider Update'; then
+      spawn_send_key "$T" Escape
+      return 0
+    fi
+    # Any evidence the session is past startup means the prompt will not appear.
+    if printf '%s\n' "$pane" | grep -qiE 'esc to cancel|Type your message'; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 0
+}
+
 kimi_capture_has_empty_composer() {  # <plain-pane-capture>
   printf '%s\n' "$1" \
     | grep -Eq '^[[:space:]]*(│|┃|\|)[[:space:]]*>[[:space:]]*(│|┃|\|)[[:space:]]*$'
@@ -1412,6 +1463,80 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
       ;;
+    qwen*)
+      # qwen fires a Stop hook at every turn boundary (verified, qwen 0.21.5),
+      # the same clean equivalent of codex's notify= and pi's turn_end.
+      # qwen loads hooks from three places: the user settings file, the workspace
+      # settings file, and any active extension. The user settings file is
+      # $HOME/.qwen/settings.json - the same file that holds the captain's
+      # provider credentials - so firstmate never edits it. Workspace hooks are
+      # filtered out unless the folder is trusted, and folder trust is a captain
+      # setting firstmate must not depend on. An EXTENSION's hooks are loaded
+      # from the extension's own directory, are enabled by default in every
+      # workspace, and need no credential file edit and no trust grant. So the
+      # turn-end hook lives OUTSIDE the worktree as a single firstmate-owned
+      # extension that is a guarded no-op for every non-firstmate qwen session:
+      # it fires only when the current workspace holds a .fm-qwen-turnend token
+      # pointer that matches the firstmate-owned registry. firstmate then drops
+      # that per-task pointer (gitignored, like the other harnesses' worktree
+      # hook files).
+      QWEN_DIR_HOME="${QWEN_HOME:-$HOME/.qwen}"
+      QWEN_EXT_DIR="$QWEN_DIR_HOME/extensions/firstmate-turn-end"
+      QWEN_AUTH_DIR="$QWEN_DIR_HOME/fm-turn-end.d"
+      mkdir -p "$QWEN_EXT_DIR" "$QWEN_AUTH_DIR"
+      chmod 700 "$QWEN_AUTH_DIR"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$QWEN_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.qwen-turnend-token"
+      sq_qwen_auth_dir=$(shell_quote "$QWEN_AUTH_DIR")
+      cat > "$QWEN_EXT_DIR/fm-turn-end.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+auth_dir=$sq_qwen_auth_dir
+workspace=\${QWEN_PROJECT_DIR:-\$PWD}
+[ -n "\$workspace" ] || exit 0
+p="\$workspace/.fm-qwen-turnend"
+[ -f "\$p" ] || exit 0
+first=
+IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || exit 0
+case "\$first" in token=*) token=\${first#token=} ;; *) exit 0 ;; esac
+case "\$token" in fm.????????????) : ;; *) exit 0 ;; esac
+case "\$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
+t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || exit 0
+case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
+touch "\$t" 2>/dev/null || true
+exit 0
+EOF
+      chmod +x "$QWEN_EXT_DIR/fm-turn-end.sh"
+      hook_command=$(json_escape "bash $(shell_quote "$QWEN_EXT_DIR/fm-turn-end.sh")")
+      printf '{"name":"firstmate-turn-end","version":"1.0.0","hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' \
+        "$hook_command" > "$QWEN_EXT_DIR/qwen-extension.json"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-qwen-turnend"
+      exclude_path '.fm-qwen-turnend'
+      # Suppress qwen's blocking "Built-in Provider Update" prompt for this task.
+      # qwen shows it on EVERY interactive launch while the bundled provider
+      # catalog differs from the version recorded in settings, and it blocks the
+      # queued brief, so an unattended crewmate would sit on it forever. Its two
+      # persistent answers ("Update all", "Skip this version") both WRITE to the
+      # captain's credential-bearing $HOME/.qwen/settings.json, so firstmate
+      # takes neither. Instead the check itself is neutralized for this worktree
+      # only: qwen merges a workspace settings file over the user one, and the
+      # check reads the merged providerMetadata namespace and skips every
+      # provider whose metadata carries no version. A workspace-scoped null
+      # namespace therefore disables the prompt without naming any provider,
+      # without changing which models exist (those come from modelProviders),
+      # and without touching a single captain-owned file.
+      # An existing project-owned .qwen/settings.json is never overwritten; that
+      # case falls through to the launch-time dismissal gate instead.
+      if [ ! -e "$WT/.qwen/settings.json" ] && [ ! -L "$WT/.qwen/settings.json" ]; then
+        mkdir -p "$WT/.qwen"
+        printf '%s\n' '{"providerMetadata": null}' > "$WT/.qwen/settings.json"
+        exclude_path '.qwen/settings.json'
+      fi
+      ;;
   esac
 fi
 
@@ -1506,6 +1631,9 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = qwen ]; then
+  qwen_dismiss_startup_prompt
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

@@ -50,7 +50,20 @@ fm_backend_tmux_send_key() {  # <target> <key>
 # submit with Enter, retried (Enter only, never retyped) until the composer
 # clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
 # that file for the composer-verification contract and echoed verdicts.
+# When the caller declares the target's recorded harness in FM_SEND_HARNESS and
+# that harness has a verified unstyled empty-composer placeholder, the placeholder
+# is supplied to the shared composer reader for this call. Only a harness that
+# registers one is affected, and an operator's own FM_COMPOSER_IDLE_RE wins, so
+# every existing adapter reads exactly as before.
 fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
+  local harness_idle_re
+  if [ -z "${FM_COMPOSER_IDLE_RE:-}" ] && [ -n "${FM_SEND_HARNESS:-}" ]; then
+    harness_idle_re=$(fm_tmux_idle_re_for_harness "$FM_SEND_HARNESS")
+    if [ -n "$harness_idle_re" ]; then
+      FM_COMPOSER_IDLE_RE=$harness_idle_re fm_tmux_submit_core "$@"
+      return
+    fi
+  fi
   fm_tmux_submit_core "$@"
 }
 
@@ -181,7 +194,7 @@ fm_backend_tmux_agent_state() {  # <target>
   }
   comm=${comm#-}
   case "$comm" in
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|*qwen*|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     '') printf 'unreadable' ;;
     *) printf 'ambiguous' ;;

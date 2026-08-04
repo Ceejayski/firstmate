@@ -1,0 +1,406 @@
+#!/usr/bin/env bash
+# Behavior tests for the verified Qwen Code CLI crewmate adapter.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+SPAWN="$ROOT/bin/fm-spawn.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
+TMP_ROOT=$(fm_test_tmproot fm-qwen-harness)
+PYTHON_BIN=$(command -v python3) || fail "test needs python3"
+PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
+BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+
+assert_source_line() {
+  local line=$1
+  grep -Fqx -- "$line" "$SPAWN" || fail "existing launch template changed: $line"
+}
+
+# The whole point of adding an adapter is that no other adapter moves. Pin every
+# pre-existing launch template byte-for-byte, including Kimi's, which the Qwen
+# work sits directly beside in the same case statement.
+test_existing_launch_templates_are_byte_pinned() {
+  assert_source_line "    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__\"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
+  assert_source_line "        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
+  assert_source_line "    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\\''{\"permission\":{\"*\":\"allow\"}}'\\'' opencode __MODELFLAG__--prompt \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
+  assert_source_line "        printf '%s%s' \"\$harness\" ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
+  assert_source_line "    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__\"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
+  assert_source_line "    kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;"
+  pass "fm-spawn: every pre-existing adapter's launch template stays byte-pinned"
+}
+
+# A fake tmux that renders the two qwen screens this adapter must tell apart: the
+# blocking built-in-provider-update prompt, and an ordinary working session.
+make_spawn_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=$(cat "$FM_FAKE_QWEN_STATE" 2>/dev/null || true)
+fake_screen() {
+  case "$state" in
+    dialog)
+      printf '  Built-in Provider Update \xc2\xb7 Token Plan\n  1. Update all\n  2. Skip this version\n  3. Remind me later (esc)\n'
+      ;;
+    working)
+      printf '  .. Counting electrons... (12s \xc2\xb7 \xe2\x86\x91 909 tokens \xc2\xb7 esc to cancel)\n*   Type your message or @path/to/file\n'
+      ;;
+    *)
+      printf 'shell starting\n$ \n'
+      ;;
+  esac
+}
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+  *"#{cursor_y}"*) printf '1\n'; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    prev=
+    literal=
+    for arg in "$@"; do
+      if [ "$prev" = -l ]; then literal=$arg; break; fi
+      prev=$arg
+    done
+    if [ -n "$literal" ]; then
+      case "$literal" in
+        *qwen*) printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG" ;;
+      esac
+      exit 0
+    fi
+    case " $* " in
+      *' Escape '*) printf '%s\n' "Escape" >> "$FM_FAKE_KEY_LOG"; printf 'working\n' > "$FM_FAKE_QWEN_STATE" ;;
+      *' Enter '*) printf '%s\n' "${FM_FAKE_QWEN_AFTER_LAUNCH:-working}" > "$FM_FAKE_QWEN_STATE" ;;
+    esac
+    exit 0
+    ;;
+  capture-pane) fake_screen; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh qwen
+  printf '%s\n' "$fakebin"
+}
+
+make_spawn_case() {
+  local name=$1 id=$2 case_dir home proj wt fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$home/.qwen"
+  # A stand-in for the captain's real credential-bearing settings file. No test
+  # here may change its bytes.
+  printf '{"env":{"SECRET_KEY":"do-not-touch"},"providerMetadata":{"token-plan":{"version":"abc"}}}\n' \
+    > "$home/.qwen/settings.json"
+  printf 'brief for qwen\n' > "$home/data/$id/brief.md"
+  printf 'qwen\n' > "$home/config/crew-harness"
+  fm_git_worktree "$proj" "$wt" "wt-$name"
+  touch "$home/state/.last-watcher-beat"
+  : > "$case_dir/launch.log"
+  : > "$case_dir/key.log"
+  : > "$case_dir/qwen.state"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+}
+
+run_spawn() {
+  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  shift 6
+  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    FM_FAKE_KEY_LOG="$case_dir/key.log" \
+    FM_FAKE_QWEN_STATE="$case_dir/qwen.state" \
+    FM_FAKE_QWEN_AFTER_LAUNCH="${FM_FAKE_QWEN_AFTER_LAUNCH:-working}" \
+    FM_QWEN_STARTUP_POLLS=2 FM_QWEN_POLL_INTERVAL=0 \
+    PATH="$fakebin:$BASE_PATH" \
+    "$SPAWN" "$id" "$proj" --harness qwen "$@" 2>&1
+}
+
+read_spawn_record() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+$1
+EOF
+}
+
+test_qwen_launch_is_verified() {
+  local id rec out rc launch meta excl
+  id=qwen-success-q1
+  rec=$(make_spawn_case success "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model deepseek-v4-pro --effort high)
+  rc=$?
+  expect_code 0 "$rc" "verified qwen launch should succeed"
+  assert_contains "$out" "spawned $id harness=qwen" "qwen spawn did not report success"
+
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "QWEN_CODE_SUPPRESS_YOLO_WARNING=1 qwen --yolo --model 'deepseek-v4-pro' -i " \
+    "qwen launch lost its verified autonomy, model, or interactive shape"
+  assert_contains "$launch" "encode launch-brief <" \
+    "qwen launch lost the canonical typed launch-brief envelope"
+  assert_not_contains "$launch" "--effort" "qwen launch emitted a nonexistent effort flag"
+  assert_not_contains "$launch" "--reasoning-effort" "qwen launch emitted a nonexistent effort flag"
+  assert_not_contains "$launch" "--fallback-model" \
+    "qwen launch enabled a silent model swap that would contradict the recorded model"
+  assert_not_contains "$launch" "turn-ended" "qwen launch embedded a turn-end path"
+  assert_not_contains "$launch" "-p " "qwen launch used the one-shot non-interactive flag"
+
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep 'harness=qwen' "$meta" "qwen meta lost its harness identity"
+  assert_grep 'model=deepseek-v4-pro' "$meta" "qwen meta lost the requested model"
+  assert_grep 'effort=high' "$meta" "qwen meta did not retain the unsupported effort axis"
+
+  assert_grep 'token=' "$WT_DIR/.fm-qwen-turnend" "qwen spawn did not write its token pointer"
+  assert_present "$HOME_DIR/state/$id.qwen-turnend-token" "qwen spawn did not record its token"
+  assert_present "$HOME_DIR/.qwen/extensions/firstmate-turn-end/qwen-extension.json" \
+    "qwen spawn did not install its guarded turn-end extension"
+  assert_present "$HOME_DIR/.qwen/extensions/firstmate-turn-end/fm-turn-end.sh" \
+    "qwen spawn did not install its guarded turn-end hook script"
+  assert_grep '"Stop"' "$HOME_DIR/.qwen/extensions/firstmate-turn-end/qwen-extension.json" \
+    "qwen turn-end extension did not register the Stop event"
+
+  excl=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
+  assert_grep '.fm-qwen-turnend' "$excl" "qwen token pointer was not excluded from the worktree"
+  assert_grep '.qwen/settings.json' "$excl" "qwen workspace settings were not excluded from the worktree"
+  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
+    || fail "qwen spawn left the worktree dirty, which would block teardown"
+  pass "fm-spawn: qwen launches interactively, unattended, and registers a guarded turn-end token"
+}
+
+# The captain's provider credentials live in the same file qwen would rewrite if
+# firstmate answered the provider-update prompt persistently. Firstmate answers it
+# by neutralizing the check per worktree instead, so that file must never change.
+test_qwen_spawn_never_writes_the_captain_settings_file() {
+  local id rec before after
+  id=qwen-settings-q2
+  rec=$(make_spawn_case settings "$id")
+  read_spawn_record "$rec"
+  before=$(cat "$HOME_DIR/.qwen/settings.json")
+  run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
+    || fail "qwen spawn should succeed"
+  after=$(cat "$HOME_DIR/.qwen/settings.json")
+  [ "$before" = "$after" ] || fail "qwen spawn modified the captain's credential-bearing settings file"
+  assert_grep '"providerMetadata": null' "$WT_DIR/.qwen/settings.json" \
+    "qwen spawn did not suppress the provider-update prompt for this worktree"
+  pass "fm-spawn: qwen suppresses the startup prompt per worktree and never edits captain settings"
+}
+
+test_qwen_spawn_preserves_a_project_owned_workspace_settings_file() {
+  local id rec original
+  id=qwen-preserve-q3
+  rec=$(make_spawn_case preserve "$id")
+  read_spawn_record "$rec"
+  mkdir -p "$WT_DIR/.qwen"
+  original='{"ui":{"theme":"project-owned"}}'
+  printf '%s\n' "$original" > "$WT_DIR/.qwen/settings.json"
+  run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
+    || fail "qwen spawn should succeed"
+  [ "$(cat "$WT_DIR/.qwen/settings.json")" = "$original" ] \
+    || fail "qwen spawn overwrote a project-owned workspace settings file"
+  pass "fm-spawn: qwen never overwrites a project's own workspace settings"
+}
+
+test_qwen_startup_prompt_is_dismissed_only_when_present() {
+  local id rec keys
+  id=qwen-dialog-q4
+  rec=$(make_spawn_case dialog "$id")
+  read_spawn_record "$rec"
+  FM_FAKE_QWEN_AFTER_LAUNCH=dialog \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
+    || fail "qwen spawn should succeed through the startup prompt"
+  keys=$(cat "$CASE_DIR/key.log")
+  assert_contains "$keys" "Escape" "the blocking provider-update prompt was not dismissed"
+
+  id=qwen-nodialog-q5
+  rec=$(make_spawn_case nodialog "$id")
+  read_spawn_record "$rec"
+  FM_FAKE_QWEN_AFTER_LAUNCH=working \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
+    || fail "qwen spawn should succeed with no startup prompt"
+  keys=$(cat "$CASE_DIR/key.log")
+  assert_not_contains "$keys" "Escape" \
+    "a working qwen pane received a blind Escape, which would cancel its first turn"
+  pass "fm-spawn: the qwen startup-prompt backstop fires only on the prompt itself"
+}
+
+test_qwen_turnend_hook_requires_a_registered_workspace_token() {
+  local id rec hook token registry marker workspace
+  id=qwen-hook-q6
+  rec=$(make_spawn_case hook "$id")
+  read_spawn_record "$rec"
+  run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
+    || fail "qwen spawn should succeed"
+  hook="$HOME_DIR/.qwen/extensions/firstmate-turn-end/fm-turn-end.sh"
+  token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-qwen-turnend")
+  registry="$HOME_DIR/.qwen/fm-turn-end.d"
+  marker="$HOME_DIR/state/$id.turn-ended"
+  workspace="$WT_DIR"
+
+  QWEN_PROJECT_DIR="$workspace" HOME="$HOME_DIR" bash "$hook" \
+    || fail "the qwen turn-end hook did not exit zero"
+  assert_present "$marker" "the qwen turn-end hook did not touch the task marker"
+
+  # A workspace with no pointer is every other qwen session on this machine.
+  rm -f "$marker"
+  QWEN_PROJECT_DIR="$TMP_ROOT" HOME="$HOME_DIR" bash "$hook" \
+    || fail "the qwen turn-end hook did not exit zero outside a firstmate workspace"
+  assert_absent "$marker" "the qwen turn-end hook fired for an unrelated workspace"
+
+  # A pointer naming an unregistered token must not resolve.
+  printf 'token=fm.zzzzzzzzzzzz\n' > "$WT_DIR/.fm-qwen-turnend"
+  QWEN_PROJECT_DIR="$workspace" HOME="$HOME_DIR" bash "$hook" \
+    || fail "the qwen turn-end hook did not exit zero for an unregistered token"
+  assert_absent "$marker" "the qwen turn-end hook honored an unregistered token"
+
+  # A registry entry naming a non-turn-end path must not be touched.
+  printf 'token=%s\n' "$token" > "$WT_DIR/.fm-qwen-turnend"
+  printf '%s\n' "$HOME_DIR/state/not-a-marker" > "$registry/$token"
+  QWEN_PROJECT_DIR="$workspace" HOME="$HOME_DIR" bash "$hook" \
+    || fail "the qwen turn-end hook did not exit zero for a rejected target"
+  assert_absent "$HOME_DIR/state/not-a-marker" "the qwen turn-end hook touched an arbitrary path"
+  pass "fm-spawn: the qwen turn-end hook is silent and fires only for a registered task"
+}
+
+test_qwen_teardown_removes_every_task_artifact() {
+  local id rec token
+  id=qwen-teardown-q7
+  rec=$(make_spawn_case teardown "$id")
+  read_spawn_record "$rec"
+  run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
+    || fail "qwen spawn should succeed before teardown"
+  token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-qwen-turnend")
+
+  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "qwen teardown failed"
+  assert_absent "$WT_DIR/.fm-qwen-turnend" "qwen token pointer survived teardown"
+  assert_absent "$WT_DIR/.qwen/settings.json" "qwen workspace settings survived teardown"
+  assert_absent "$HOME_DIR/.qwen/fm-turn-end.d/$token" "qwen registry token survived teardown"
+  assert_absent "$HOME_DIR/state/$id.qwen-turnend-token" "qwen token state survived teardown"
+  pass "fm-teardown: every qwen task artifact is removed"
+}
+
+test_qwen_busy_signature_is_the_mid_turn_cancel_hint() {
+  local capture
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-tmux-lib.sh"
+  unset FM_BUSY_REGEX
+  capture="$TMP_ROOT/qwen-busy-pane"
+  # shellcheck disable=SC2329 # Runtime override called by the sourced tmux lib.
+  tmux() {
+    case "${1:-}" in
+      capture-pane) cat "$capture" ;;
+      *) return 0 ;;
+    esac
+  }
+  printf '  .. Counting electrons... (34s \xc2\xb7 \xe2\x86\x91 909 tokens \xc2\xb7 esc to cancel)\n' > "$capture"
+  fm_pane_is_busy fake qwen || fail "qwen's mid-turn footer was not recognized as busy"
+  # The idle footer names other keys and must never read as busy.
+  printf '  Enter to steer \xc2\xb7 Ctrl+Q to queue \xc2\xb7 YOLO mode (shift + tab to cycle)\n' > "$capture"
+  if fm_pane_is_busy fake qwen; then
+    fail "qwen's idle footer was misread as busy"
+  fi
+  # The startup prompt's own "Remind me later (esc)" line is not a busy signal.
+  printf '  3. Remind me later (esc)\n' > "$capture"
+  if fm_pane_is_busy fake qwen; then
+    fail "qwen's startup prompt was misread as a running turn"
+  fi
+  # Registered adapters keep their own signatures.
+  printf '  .. thinking (12s \xc2\xb7 esc to cancel)\n' > "$capture"
+  if fm_pane_is_busy fake codex; then
+    fail "qwen's signature leaked into another harness"
+  fi
+  unset -f tmux
+  pass "fm-tmux-lib: qwen's busy signature is its mid-turn cancel hint only"
+}
+
+test_qwen_idle_placeholder_reads_as_an_empty_composer() {
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-tmux-lib.sh"
+  local idle_re
+  idle_re=$(fm_tmux_idle_re_for_harness qwen)
+  [ -n "$idle_re" ] || fail "qwen has no registered idle-composer placeholder"
+  [ -z "$(fm_tmux_idle_re_for_harness claude)" ] \
+    || fail "an existing adapter gained an idle-composer placeholder it did not have"
+  [ -z "$(fm_tmux_idle_re_for_harness grok)" ] \
+    || fail "an existing adapter gained an idle-composer placeholder it did not have"
+
+  # qwen's placeholder carries no ghost styling, so only this registered pattern
+  # can make an idle composer read as empty.
+  [ "$(fm_composer_classify_content 0 '*   Type your message or @path/to/file' "$idle_re" insensitive)" = empty ] \
+    || fail "qwen's idle placeholder did not read as an empty composer"
+  [ "$(fm_composer_classify_content 0 '*   Type your message' "$idle_re" insensitive)" = empty ] \
+    || fail "qwen's short idle placeholder did not read as an empty composer"
+  [ "$(fm_composer_classify_content 0 '* Reply with exactly: STEER-OK' "$idle_re" insensitive)" = pending ] \
+    || fail "real typed qwen input was misread as an empty composer"
+  [ "$(fm_composer_classify_content 0 '* Type your message or @path/to/file and then stop' "$idle_re" insensitive)" = pending ] \
+    || fail "typed text that merely starts like the placeholder was misread as empty"
+  pass "fm-tmux-lib: qwen's unstyled idle placeholder reads empty without widening any other adapter"
+}
+
+test_qwen_is_a_verified_adapter_everywhere_the_set_is_asserted() {
+  grep -Fq 'claude|codex|opencode|pi|pi-signed|grok|kimi|qwen' "$SPAWN" \
+    || fail "fm-spawn does not accept qwen as a bare adapter name"
+  grep -Fq '"kimi","qwen"' "$ROOT/bin/fm-bootstrap.sh" \
+    || fail "bootstrap does not treat qwen as a verified dispatch-profile harness"
+  grep -Fq 'kimi|qwen|' "$ROOT/bin/fm-session-lock-lib.sh" \
+    || fail "the session lock does not recognize a qwen holder"
+  grep -Fq '*qwen*' "$ROOT/bin/backends/tmux.sh" \
+    || fail "the tmux backend does not classify a live qwen process as alive"
+  grep -Fq "\`kimi\`, and \`qwen\`" "$ROOT/AGENTS.md" \
+    || fail "AGENTS.md does not list qwen among the verified harnesses"
+  grep -Fq '## qwen (VERIFIED' "$ROOT/.agents/skills/harness-adapters/SKILL.md" \
+    || fail "the harness-adapters skill has no verified qwen section"
+  pass "repository: qwen is registered everywhere the verified-adapter set is asserted"
+}
+
+test_qwen_detection_uses_ancestry() {
+  local dir fakebin got
+  dir="$TMP_ROOT/detection"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *comm=*) printf '/opt/test/bin/qwen\n' ;;
+  *args=*) printf 'qwen --yolo\n' ;;
+  *ppid=*) printf '1\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/ps"
+  # qwen is markerless, so ancestry only decides once the surrounding session's
+  # own harness markers are out of the environment.
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = qwen ] || fail "qwen ancestry resolved '$got', expected qwen"
+  # A foreign marker still wins by the documented precedence rule.
+  got=$(env -u PI_CODING_AGENT -u GROK_AGENT CLAUDECODE=1 \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = claude ] || fail "marker precedence changed for a qwen ancestry"
+  pass "fm-harness: qwen is detected by process ancestry"
+}
+
+test_existing_launch_templates_are_byte_pinned
+test_qwen_launch_is_verified
+test_qwen_spawn_never_writes_the_captain_settings_file
+test_qwen_spawn_preserves_a_project_owned_workspace_settings_file
+test_qwen_startup_prompt_is_dismissed_only_when_present
+test_qwen_turnend_hook_requires_a_registered_workspace_token
+test_qwen_teardown_removes_every_task_artifact
+test_qwen_busy_signature_is_the_mid_turn_cancel_hint
+test_qwen_idle_placeholder_reads_as_an_empty_composer
+test_qwen_is_a_verified_adapter_everywhere_the_set_is_asserted
+test_qwen_detection_uses_ancestry

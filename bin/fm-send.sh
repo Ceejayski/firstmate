@@ -268,6 +268,12 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  # Declare the target's recorded harness so the backend can supply that
+  # harness's verified empty-composer placeholder to submit-verification. A
+  # harness whose placeholder carries no ghost styling (qwen) would otherwise
+  # leave every idle composer reading as pending input, and a genuinely delivered
+  # message would be refused as unconfirmed.
+  export FM_SEND_HARNESS="$TARGET_HARNESS"
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
   if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
