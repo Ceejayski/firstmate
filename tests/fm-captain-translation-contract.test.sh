@@ -294,17 +294,21 @@ test_ahoy_user_role_injections_share_one_marker
 
 test_public_skills_contain_no_private_project_paths() {
   # Public skills in skills/*/SKILL.md must be standalone - no references to private project paths,
-  # FM_HOME-relative state, or captain-private data directories.
-  local skill_file private_pattern
+  # FM_HOME-relative state, internal bin scripts, .agents/ paths, or firstmate house vocabulary.
+  local skill_file leak
   for skill_file in "$ROOT"/skills/*/SKILL.md; do
     [ -f "$skill_file" ] || continue
-    # Check for common private path patterns that would break portability.
-    private_pattern='data/\|state/\|config/\|projects/\|FM_HOME'
-    if grep -q "$private_pattern" "$skill_file"; then
-      fail "Public skill $skill_file references private paths (data/, state/, config/, projects/, or FM_HOME)"
+    # Check for firstmate-specific paths in path-like contexts (backticked, slash-bounded, or tilde-prefixed).
+    # "loading state" and "theme config" are prose, not paths - pattern must distinguish.
+    if leak=$(grep -E '`(data/|state/|config/|projects/|\.agents/|bin/fm-)|~/(data|state|config|projects)|/(data|state|config|projects)/' "$skill_file" | head -1); then
+      fail "Public skill $skill_file references firstmate-private paths: $leak"
+    fi
+    # Check for FM_HOME and firstmate house vocabulary (crewmate/firstmate outside natural skill-load phrasing).
+    if leak=$(grep -E 'FM_HOME|[^a-z](crewmate|firstmate)[^a-z]' "$skill_file" | grep -vE 'Load|load|invoke|Invoke' | head -1); then
+      fail "Public skill $skill_file uses firstmate-internal vocabulary: $leak"
     fi
   done
-  pass "Public skills contain no private project paths"
+  pass "Public skills contain no firstmate-private references"
 }
 
 test_public_skills_contain_no_private_project_paths
