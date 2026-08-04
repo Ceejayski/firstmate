@@ -218,12 +218,36 @@ remove_qwen_turnend_auth() {
 # The marker is the content spawn writes - providerMetadata set to null and
 # nothing else of firstmate's. qwen rewrites the file in place at runtime to add
 # its own "$version" key, so that one key is tolerated and no other addition is.
+# That key's VALUE is a JSON number in practice (qwen 0.21.5 writes
+# {"providerMetadata": null, "$version": 4}), so the tolerance must accept any
+# JSON scalar - number, string, boolean, or null - rather than a quoted string
+# only. Matching a quoted string alone silently stopped recognizing firstmate's
+# own file after any real qwen run, which leaked it into the returned pool
+# worktree for whatever task picked that worktree up next.
+# The check is structural rather than a strip-and-compare so a value can never
+# smuggle extra members past it: the compacted object must be exactly
+# providerMetadata:null, optionally plus one $version whose value carries no
+# JSON structural character. Anything else is somebody else's file and is kept.
 qwen_workspace_settings_is_firstmate_owned() {
-  local file=$1 compact
+  local file=$1 compact rest
   compact=$(tr -d ' \t\r\n' < "$file" 2>/dev/null) || return 1
-  compact=$(printf '%s' "$compact" \
-    | sed -e 's/"[$]version":"[^"]*",//' -e 's/,"[$]version":"[^"]*"//')
-  [ "$compact" = '{"providerMetadata":null}' ]
+  # shellcheck disable=SC2016  # single quotes are deliberate: "$version" is qwen's literal JSON key, not an expansion
+  case "$compact" in
+    '{"providerMetadata":null}') return 0 ;;
+    '{"providerMetadata":null,"$version":'*'}')
+      rest=${compact#'{"providerMetadata":null,"$version":'}
+      rest=${rest%\}}
+      ;;
+    '{"$version":'*',"providerMetadata":null}')
+      rest=${compact#'{"$version":'}
+      rest=${rest%',"providerMetadata":null}'}
+      ;;
+    *) return 1 ;;
+  esac
+  case "$rest" in
+    ''|*[][,{}:]*) return 1 ;;
+  esac
+  return 0
 }
 
 remove_qwen_workspace_settings() {

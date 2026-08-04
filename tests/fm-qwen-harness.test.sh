@@ -326,6 +326,10 @@ test_qwen_teardown_preserves_a_project_owned_workspace_settings_file() {
 
 # qwen rewrites the file in place at runtime to record its own "$version", so
 # ownership cannot be an exact byte match against what spawn wrote.
+# The payload here is the EXACT text a real qwen 0.21.5 run left in a live
+# worktree: the value is a JSON NUMBER. An ownership test that tolerated only a
+# quoted string passed its own unit case and still leaked this file on every
+# real run, so this case is pinned to the observed form, not a plausible one.
 test_qwen_teardown_removes_its_own_file_after_qwen_rewrites_it() {
   local id rec
   id=qwen-teardown-version-q7c
@@ -334,13 +338,60 @@ test_qwen_teardown_removes_its_own_file_after_qwen_rewrites_it() {
   run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
     || fail "qwen spawn should succeed before teardown"
   # shellcheck disable=SC2016  # single quotes are deliberate: qwen's literal "$version" key, not an expansion
-  printf '%s\n' '{"providerMetadata": null, "$version": "0.21.5"}' \
+  printf '{\n  "providerMetadata": null,\n  "$version": 4\n}\n' \
     > "$WT_DIR/.qwen/settings.json"
 
   run_qwen_teardown "$id" --force || fail "qwen teardown failed"
   assert_absent "$WT_DIR/.qwen/settings.json" \
     "firstmate's own workspace settings survived teardown after qwen stamped its version"
   pass "fm-teardown: firstmate's own workspace settings are removed even after qwen rewrites them"
+}
+
+# The ownership predicate decides whether teardown deletes a file it did not
+# necessarily write, so it is worth testing directly across the whole shape
+# space rather than only through the one form an end-to-end run happens to
+# produce. Extracting it also pins its name and top-level definition.
+test_qwen_settings_ownership_matrix() {
+  local fn="$TMP_ROOT/qwen-ownership-fn.sh" probe="$TMP_ROOT/qwen-ownership.json" payload
+  sed -n '/^qwen_workspace_settings_is_firstmate_owned()/,/^}/p' "$TEARDOWN" > "$fn"
+  [ -s "$fn" ] || fail "could not extract qwen_workspace_settings_is_firstmate_owned from $TEARDOWN"
+  # shellcheck source=/dev/null
+  . "$fn"
+
+  # Firstmate's own file, in every form qwen may leave it in.
+  # shellcheck disable=SC2016  # single quotes are deliberate: qwen's literal "$version" key, not an expansion
+  for payload in \
+    '{"providerMetadata": null}' \
+    '{
+  "providerMetadata": null,
+  "$version": 4
+}' \
+    '{"providerMetadata": null, "$version": "0.21.5"}' \
+    '{"providerMetadata": null, "$version": true}' \
+    '{"providerMetadata": null, "$version": null}' \
+    '{"$version": 4, "providerMetadata": null}'; do
+    printf '%s' "$payload" > "$probe"
+    qwen_workspace_settings_is_firstmate_owned "$probe" \
+      || fail "firstmate's own settings file was not recognized as owned: $payload"
+  done
+
+  # Anything else belongs to the project or the crewmate and must survive.
+  # shellcheck disable=SC2016  # single quotes are deliberate: qwen's literal "$version" key, not an expansion
+  for payload in \
+    '{"ui":{"theme":"project-owned"}}' \
+    '{"providerMetadata": null, "ui": {"theme":"x"}}' \
+    '{"providerMetadata": {"token-plan":{"version":"abc"}}}' \
+    '{"providerMetadata": null, "hooks": {"Stop": []}}' \
+    '{"providerMetadata": null, "$version": {"a":1}}' \
+    '{"providerMetadata": null, "$version": [1,2]}' \
+    'not json at all' \
+    ''; do
+    printf '%s' "$payload" > "$probe"
+    if qwen_workspace_settings_is_firstmate_owned "$probe"; then
+      fail "a file firstmate did not write was claimed as owned and would be deleted: $payload"
+    fi
+  done
+  pass "fm-teardown: settings ownership accepts every form of firstmate's own file and no other"
 }
 
 # The tolerance the dirty check grants must stay pinned to the one file firstmate
@@ -479,6 +530,7 @@ test_qwen_turnend_hook_requires_a_registered_workspace_token
 test_qwen_teardown_removes_every_task_artifact
 test_qwen_teardown_preserves_a_project_owned_workspace_settings_file
 test_qwen_teardown_removes_its_own_file_after_qwen_rewrites_it
+test_qwen_settings_ownership_matrix
 test_qwen_dirty_check_tolerance_is_only_the_settings_file
 test_qwen_busy_signature_is_the_mid_turn_cancel_hint
 test_qwen_idle_placeholder_reads_as_an_empty_composer
