@@ -48,6 +48,12 @@ fake_screen() {
     working)
       printf '  .. Counting electrons... (12s \xc2\xb7 \xe2\x86\x91 909 tokens \xc2\xb7 esc to cancel)\n*   Type your message or @path/to/file\n'
       ;;
+    docprose)
+      # A crewmate legitimately reading this repo's own harness docs: the modal's
+      # phrase and every one of its answers are on screen, inside a sentence.
+      printf '  On every interactive launch qwen raises a modal `Built-in Provider Update \xc2\xb7 <provider>` prompt offering `1. Update all`, `2. Skip this version`, `3. Remind me later (esc)`.\n'
+      printf '*   Type your message or @path/to/file\n'
+      ;;
     late)
       # The composer is already up; the modal lands on the NEXT poll.
       printf '  .. Counting electrons... (12s \xc2\xb7 \xe2\x86\x91 909 tokens \xc2\xb7 esc to cancel)\n*   Type your message or @path/to/file\n'
@@ -298,6 +304,27 @@ test_qwen_startup_prompt_is_dismissed_when_it_arrives_late() {
   assert_contains "$keys" "Escape" \
     "a provider-update prompt raised after the composer rendered was never dismissed"
   pass "fm-spawn: the qwen startup-prompt backstop still catches a late prompt"
+}
+
+# The detector reads pane content, and this repo documents the dialog, so a
+# crewmate reading the harness-adapters skill renders the modal's own phrase. The
+# gate must not treat that as the modal: Escapes would cancel its live first turn
+# and the spawn would then hard-fail an agent that is working fine.
+test_qwen_startup_backstop_ignores_the_dialog_quoted_in_prose() {
+  local id rec out rc keys
+  id=qwen-docprose-q4d
+  rec=$(make_spawn_case docprose "$id")
+  read_spawn_record "$rec"
+  out=$(FM_FAKE_QWEN_AFTER_LAUNCH=docprose \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "a qwen pane merely rendering the dialog's documentation failed its spawn"
+  assert_contains "$out" "spawned $id harness=qwen" \
+    "a healthy qwen crewmate reading this repo's own docs was not spawned"
+  keys=$(cat "$CASE_DIR/key.log")
+  assert_not_contains "$keys" "Escape" \
+    "the dialog's phrase in a rendered file drew an Escape into a live first turn"
+  pass "fm-spawn: the qwen startup backstop reads the modal's structure, not its prose"
 }
 
 # A dialog that outlives the Escape budget means the brief was never delivered.
@@ -557,6 +584,7 @@ test_qwen_spawn_never_writes_the_captain_settings_file
 test_qwen_spawn_preserves_a_project_owned_workspace_settings_file
 test_qwen_startup_prompt_is_dismissed_only_when_present
 test_qwen_startup_prompt_is_dismissed_when_it_arrives_late
+test_qwen_startup_backstop_ignores_the_dialog_quoted_in_prose
 test_qwen_spawn_fails_when_the_startup_prompt_never_clears
 test_qwen_turnend_hook_requires_a_registered_workspace_token
 test_qwen_teardown_removes_every_task_artifact

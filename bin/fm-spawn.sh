@@ -1237,17 +1237,36 @@ kimi_capture() {
 # Three outcomes, decided on captured evidence rather than on whether an Escape
 # was ever sent: the prompt was never raised (0, the normal case), the prompt was
 # raised and is verifiably gone (0), or a final capture taken after the window and
-# the Escape budget are spent STILL shows the title (1). That last case means the
+# the Escape budget are spent STILL shows the modal (1). That last case means the
 # pane is wedged behind a modal and the brief cannot be delivered, so it is a
 # spawn failure, not a warning - the caller must not report success for it. The
 # final capture is what decides, so a prompt cleared on the very last poll still
 # passes.
+#
+# The detector reads PANE CONTENT, which makes this hazard self-referential:
+# documenting the dialog put its exact phrase into tracked files of THIS repo,
+# including the harness-adapters skill AGENTS.md section 4 requires agents to load
+# before spawn and recovery work. A qwen crewmate working the firstmate repo
+# starts its brief while this gate is still polling, so rendering one of those
+# files would match a bare-title test, fire Escapes into a live first turn
+# (cancelling real work), and then hard-fail the spawn of a healthy agent.
+# So match the modal's STRUCTURE, never its prose: the title must co-occur with at
+# least one of its recorded numbered answers drawn as its OWN line, the way the
+# modal renders them and the way a file quoting them in a sentence does not.
+# Do not widen this back to the title alone, and do not quote the modal's answers
+# as standalone lines into files agents load.
+qwen_capture_has_startup_modal() {  # <plain-pane-capture>
+  printf '%s\n' "$1" | grep -Fq 'Built-in Provider Update' || return 1
+  printf '%s\n' "$1" \
+    | grep -Eq '^[[:space:]]*(│|┃)?[[:space:]]*(1\.[[:space:]]+Update all|2\.[[:space:]]+Skip this version|3\.[[:space:]]+Remind me later)([[:space:]]|$)'
+}
+
 qwen_dismiss_startup_prompt() {
   local pane i=0 max=${FM_QWEN_STARTUP_POLLS:-40} interval=${FM_QWEN_POLL_INTERVAL:-0.5}
   local escapes=0 max_escapes=${FM_QWEN_STARTUP_ESCAPES:-3} seen=0
   while [ "$i" -lt "$max" ]; do
     pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
-    if printf '%s\n' "$pane" | grep -Fq 'Built-in Provider Update'; then
+    if qwen_capture_has_startup_modal "$pane"; then
       # Still up: Escape it, bounded, and keep watching until it is verifiably gone.
       seen=1
       if [ "$escapes" -lt "$max_escapes" ]; then
@@ -1266,7 +1285,7 @@ qwen_dismiss_startup_prompt() {
   # then let a fresh capture - not the loop's last one - deliver the verdict.
   sleep "$interval"
   pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
-  printf '%s\n' "$pane" | grep -Fq 'Built-in Provider Update' || return 0
+  qwen_capture_has_startup_modal "$pane" || return 0
   return 1
 }
 
