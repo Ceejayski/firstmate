@@ -1228,12 +1228,16 @@ kimi_capture() {
 # the composer renders: qwen can raise this modal after the TUI has mounted, and
 # a backstop that disarms on that race is no backstop at all - the crewmate would
 # sit behind a blocking dialog forever in a pane that reads healthy. The cost of
-# that choice lands on EVERY qwen spawn, not only the fallback cases: a spawn
-# that never raises the prompt now waits out the full window
-# (FM_QWEN_STARTUP_POLLS x FM_QWEN_POLL_INTERVAL, 20s by default) before the
-# brief is sent. Only a launch that actually showed and cleared the prompt
-# returns early. The primary defense - the per-worktree .qwen/settings.json that
-# stops the prompt from being raised - is unchanged and pays no dialog cost.
+# that choice lands on EVERY qwen spawn, not only the fallback cases: every spawn
+# waits out the full window (FM_QWEN_STARTUP_POLLS x FM_QWEN_POLL_INTERVAL, 20s by
+# default) before the brief is sent. Nothing returns early, INCLUDING a launch
+# whose modal was already cleared: the recorded title is per-provider
+# (Built-in Provider Update - <provider>), so a captain with several configured
+# providers can be shown a second modal after the first is dismissed, and standing
+# down on the intervening clean poll would wedge the crewmate behind that second
+# dialog in a pane that reads healthy - the exact failure this gate exists to
+# prevent. The primary defense - the per-worktree .qwen/settings.json that stops
+# the prompt from being raised - is unchanged and pays no dialog cost.
 # Three outcomes, decided on captured evidence rather than on whether an Escape
 # was ever sent: the prompt was never raised (0, the normal case), the prompt was
 # raised and is verifiably gone (0), or a final capture taken after the window and
@@ -1273,8 +1277,6 @@ qwen_dismiss_startup_prompt() {
         spawn_send_key "$T" Escape
         escapes=$((escapes + 1))
       fi
-    elif [ "$escapes" -gt 0 ]; then
-      return 0
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
@@ -1331,15 +1333,10 @@ kimi_wait_for_delivery() {
   return 1
 }
 
-kimi_spawn_fail() {  # <detail>
-  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
-}
-
-# Same contract as kimi_spawn_fail, for the qwen startup gate: record the failure
-# on the task's own status file so a supervisor reading state sees it, and name
-# the pane to inspect on stderr.
-qwen_spawn_fail() {  # <detail>
+# One contract for every adapter's launch-gate failures: record the failure on the
+# task's own status file so a supervisor reading state sees it, and name the pane
+# to inspect on stderr. Callers keep their own per-harness comment.
+spawn_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
 }
@@ -1586,10 +1583,17 @@ EOF
       # and without touching a single captain-owned file.
       # An existing project-owned .qwen/settings.json is never overwritten; that
       # case falls through to the launch-time dismissal gate instead.
+      # This file is deliberately NOT passed to exclude_path. Unlike the
+      # firstmate-named pointers above, .qwen/settings.json is qwen's ordinary
+      # workspace-config path, and info/exclude is CLONE-COMMON: an entry written
+      # here would apply to every worktree of the project, outlive this task
+      # (nothing removes it), and silently hide a later crewmate's own edits to
+      # that file from git status, git add -A, and therefore from its commit.
+      # fm-teardown's untracked-tolerance for .qwen/ is what keeps this file from
+      # blocking a ship task's worktree return instead.
       if [ ! -e "$WT/.qwen/settings.json" ] && [ ! -L "$WT/.qwen/settings.json" ]; then
         mkdir -p "$WT/.qwen"
         printf '%s\n' '{"providerMetadata": null}' > "$WT/.qwen/settings.json"
-        exclude_path '.qwen/settings.json'
       fi
       ;;
   esac
@@ -1688,13 +1692,13 @@ fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = qwen ]; then
   if ! qwen_dismiss_startup_prompt; then
-    qwen_spawn_fail "qwen is still showing its blocking built-in-provider-update dialog after ${FM_QWEN_STARTUP_ESCAPES:-3} Escapes; the brief was never delivered"
+    spawn_fail "qwen is still showing its blocking built-in-provider-update dialog after ${FM_QWEN_STARTUP_ESCAPES:-3} Escapes; the brief was never delivered"
     exit 1
   fi
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
@@ -1704,15 +1708,15 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
     "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_fail "kimi brief pointer could not be submitted"
     exit 1
   }
   if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_fail "kimi brief pointer could not be submitted"
     exit 1
   fi
   if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    spawn_fail "kimi brief pointer delivery was not confirmed"
     exit 1
   fi
 fi

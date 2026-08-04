@@ -735,7 +735,13 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.qwen/settings\.json$|\.fm-(grok|kimi|qwen)-turnend$)' | head -1 || true)
+  # Untracked harness scratch that firstmate itself put in the worktree is not the
+  # crewmate's work and must not refuse the return. The .qwen/ entry is the
+  # DIRECTORY form, like .claude/, because that is what porcelain actually emits:
+  # `git status --porcelain` with the default -u normal collapses a fully-untracked
+  # directory to a single `?? .qwen/` line and never lists the settings file
+  # individually, so a tolerance naming the file could not match at all.
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.qwen/|\.fm-(grok|kimi|qwen)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then

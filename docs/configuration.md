@@ -203,7 +203,8 @@ Kimi continues to use the captain's normal Kimi home, including the existing con
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For qwen crews, `fm-spawn.sh` installs one firstmate-owned Qwen extension under `$QWEN_HOME/extensions/firstmate-turn-end/`, or `~/.qwen/extensions/firstmate-turn-end/` when `QWEN_HOME` is unset, records a matching private registry token beside it, and drops a per-task `.fm-qwen-turnend` pointer in the worktree.
-It also writes a gitignored per-worktree `.qwen/settings.json` that suppresses Qwen's blocking built-in-provider-update prompt, leaving an existing project-owned file untouched.
+It also writes a per-worktree `.qwen/settings.json` that suppresses Qwen's blocking built-in-provider-update prompt, leaving an existing project-owned file untouched.
+That file is deliberately NOT added to `info/exclude`: that list is clone-common and permanent, so an entry there would hide a later crewmate's own edits to `.qwen/settings.json` in every worktree of the project. Teardown's untracked-tolerance for `.qwen/` is what keeps it from blocking a worktree return instead.
 Firstmate never edits the captain's credential-bearing `~/.qwen/settings.json`; teardown removes the pointer, the worktree settings file, the registry token, and the state token.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 

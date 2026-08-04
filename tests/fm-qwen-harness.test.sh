@@ -59,6 +59,16 @@ fake_screen() {
       printf '  .. Counting electrons... (12s \xc2\xb7 \xe2\x86\x91 909 tokens \xc2\xb7 esc to cancel)\n*   Type your message or @path/to/file\n'
       printf 'dialog\n' > "$FM_FAKE_QWEN_STATE"
       ;;
+    dialogagain)
+      # A first modal that clears into a healthy-looking pane and is then followed
+      # by a SECOND one (a captain with more than one configured provider).
+      printf '  Built-in Provider Update \xc2\xb7 Token Plan\n  1. Update all\n  2. Skip this version\n  3. Remind me later (esc)\n'
+      ;;
+    relapse)
+      # The pane reads healthy on this poll; the second modal lands on the next.
+      printf '  .. Counting electrons... (12s \xc2\xb7 \xe2\x86\x91 909 tokens \xc2\xb7 esc to cancel)\n*   Type your message or @path/to/file\n'
+      printf 'dialog\n' > "$FM_FAKE_QWEN_STATE"
+      ;;
     *)
       printf 'shell starting\n$ \n'
       ;;
@@ -88,9 +98,14 @@ case "${1:-}" in
     case " $* " in
       *' Escape '*)
         printf '%s\n' "Escape" >> "$FM_FAKE_KEY_LOG"
-        # A qwen that ignores Escape: the modal stays up no matter the budget.
-        [ "${FM_FAKE_QWEN_STICKY_DIALOG:-0}" = 1 ] \
-          || printf 'working\n' > "$FM_FAKE_QWEN_STATE"
+        if [ "${FM_FAKE_QWEN_STICKY_DIALOG:-0}" = 1 ]; then
+          # A qwen that ignores Escape: the modal stays up no matter the budget.
+          :
+        elif [ "$state" = dialogagain ]; then
+          printf 'relapse\n' > "$FM_FAKE_QWEN_STATE"
+        else
+          printf 'working\n' > "$FM_FAKE_QWEN_STATE"
+        fi
         ;;
       *' Enter '*) printf '%s\n' "${FM_FAKE_QWEN_AFTER_LAUNCH:-working}" > "$FM_FAKE_QWEN_STATE" ;;
     esac
@@ -189,9 +204,13 @@ test_qwen_launch_is_verified() {
 
   excl=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
   assert_grep '.fm-qwen-turnend' "$excl" "qwen token pointer was not excluded from the worktree"
-  assert_grep '.qwen/settings.json' "$excl" "qwen workspace settings were not excluded from the worktree"
-  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
-    || fail "qwen spawn left the worktree dirty, which would block teardown"
+  # info/exclude is CLONE-COMMON and nothing ever removes an entry from it, so
+  # excluding qwen's ordinary workspace-config path would permanently hide a later
+  # crewmate's own edits to it in every worktree of the project.
+  assert_no_grep '.qwen/settings.json' "$excl" \
+    "qwen spawn wrote a permanent clone-wide git exclude for a conventional project config path"
+  [ "$(git -C "$WT_DIR" status --porcelain)" = '?? .qwen/' ] \
+    || fail "qwen spawn left worktree changes beyond its own untracked .qwen/ directory"
   pass "fm-spawn: qwen launches interactively, unattended, and registers a guarded turn-end token"
 }
 
@@ -304,6 +323,27 @@ test_qwen_startup_prompt_is_dismissed_when_it_arrives_late() {
   assert_contains "$keys" "Escape" \
     "a provider-update prompt raised after the composer rendered was never dismissed"
   pass "fm-spawn: the qwen startup-prompt backstop still catches a late prompt"
+}
+
+# The modal title is per-provider (`Built-in Provider Update · <provider>`), so a
+# captain with several configured providers can be shown a SECOND modal after the
+# first is dismissed. A gate that stood down on the clean poll between them would
+# report success and leave the crewmate wedged behind the second dialog - exactly
+# the failure the gate exists to prevent - so it stays armed for the whole window.
+test_qwen_startup_prompt_is_dismissed_when_a_second_modal_follows() {
+  local id rec out rc escapes
+  id=qwen-twodialogs-q4e
+  rec=$(make_spawn_case twodialogs "$id")
+  read_spawn_record "$rec"
+  out=$(FM_FAKE_QWEN_AFTER_LAUNCH=dialogagain FM_QWEN_STARTUP_POLLS=6 \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "qwen spawn should succeed once both startup modals are cleared"
+  assert_contains "$out" "spawned $id harness=qwen" "qwen spawn did not report success"
+  escapes=$(grep -c '^Escape$' "$CASE_DIR/key.log" || true)
+  [ "$escapes" -ge 2 ] \
+    || fail "a second provider-update modal raised after the first was cleared drew no Escape (got $escapes)"
+  pass "fm-spawn: the qwen startup backstop stays armed after a dismissal and catches a second modal"
 }
 
 # The detector reads pane content, and this repo documents the dialog, so a
@@ -452,12 +492,39 @@ test_qwen_settings_ownership_matrix() {
   pass "fm-teardown: settings ownership accepts every form of firstmate's own file and no other"
 }
 
-# The tolerance the dirty check grants must stay pinned to the one file firstmate
-# writes; uncommitted work a crewmate left elsewhere under .qwen/ must still refuse.
-test_qwen_dirty_check_tolerance_is_only_the_settings_file() {
-  assert_source_line "  dirty=\$(printf '%s\\n' \"\$dirty_raw\" | grep -vE '^\\?\\? (\\.claude/|\\.qwen/settings\\.json\$|\\.fm-(grok|kimi|qwen)-turnend\$)' | head -1 || true)" \
-    "$TEARDOWN"
-  pass "fm-teardown: the untracked dirty-check tolerance names only .qwen/settings.json"
+# firstmate's own workspace settings file is untracked and NOT git-excluded, so
+# this tolerance is load-bearing: without it every qwen ship task's worktree return
+# is refused as dirty. It must therefore match what porcelain actually emits.
+# `git status --porcelain` with the default -u normal COLLAPSES a fully-untracked
+# directory to a single `?? .qwen/` line and never names the settings file, so a
+# file-form tolerance could not match at all. This runs the real filter over real
+# git output rather than pinning a regex that reads plausible.
+test_qwen_dirty_check_tolerates_firstmates_untracked_qwen_dir() {
+  local line pattern repo porcelain dirty
+  assert_source_line "  dirty=\$(printf '%s\\n' \"\$dirty_raw\" | grep -vE '^\\?\\? (\\.claude/|\\.qwen/|\\.fm-(grok|kimi|qwen)-turnend\$)' | head -1 || true)" \
+    "$TEARDOWN" "the teardown dirty-check tolerance is no longer the .qwen/ directory form"
+
+  line=$(grep -F "dirty=\$(printf '%s\\n' \"\$dirty_raw\" | grep -vE '" "$TEARDOWN") \
+    || fail "could not read the dirty-check tolerance out of $TEARDOWN"
+  pattern=${line#*grep -vE \'}
+  pattern=${pattern%%\'*}
+
+  repo="$TMP_ROOT/dirty-tolerance"
+  fm_git_init_commit "$repo"
+  mkdir -p "$repo/.qwen"
+  printf '%s\n' '{"providerMetadata": null}' > "$repo/.qwen/settings.json"
+  porcelain=$(git -C "$repo" status --porcelain)
+  [ "$porcelain" = '?? .qwen/' ] \
+    || fail "git no longer collapses a fully-untracked .qwen/ to '?? .qwen/'; got: $porcelain"
+  dirty=$(printf '%s\n' "$porcelain" | grep -vE "$pattern" | head -1 || true)
+  [ -z "$dirty" ] \
+    || fail "teardown would refuse a qwen worktree return over firstmate's own settings file: $dirty"
+
+  # A crewmate's real uncommitted work still refuses.
+  printf 'work\n' > "$repo/crewmate-work.txt"
+  dirty=$(git -C "$repo" status --porcelain | grep -vE "$pattern" | head -1 || true)
+  [ -n "$dirty" ] || fail "teardown tolerated a crewmate's uncommitted work outside .qwen/"
+  pass "fm-teardown: the dirty check tolerates firstmate's untracked .qwen/ as git actually reports it"
 }
 
 test_qwen_teardown_removes_every_task_artifact() {
@@ -509,6 +576,30 @@ test_qwen_busy_signature_is_the_mid_turn_cancel_hint() {
   fi
   unset -f tmux
   pass "fm-tmux-lib: qwen's busy signature is its mid-turn cancel hint only"
+}
+
+# A new adapter must not move the harness-AGNOSTIC busy default. That default is
+# what the submit core's busy-queued-Enter fallback reads when no harness is
+# recorded, and it is consulted for claude/codex/opencode/pi panes too. qwen's
+# `esc to cancel` appears verbatim in this repo's own tracked files, so putting it
+# there would make a crewmate on another harness rendering one of them read as
+# busy - and a genuinely swallowed Enter would then be reported as delivered.
+test_shared_busy_default_is_unchanged_by_the_qwen_adapter() {
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-tmux-lib.sh"
+  unset FM_BUSY_REGEX
+  [ "$FM_TMUX_BUSY_REGEX_DEFAULT" = 'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel' ] \
+    || fail "the harness-agnostic busy default gained or lost a token: $FM_TMUX_BUSY_REGEX_DEFAULT"
+  [ "$FM_TMUX_QWEN_BUSY_REGEX_DEFAULT" = 'esc to cancel' ] \
+    || fail "qwen lost its own busy signature: $FM_TMUX_QWEN_BUSY_REGEX_DEFAULT"
+  if printf '  .. Counting electrons... (34s \xc2\xb7 esc to cancel)\n' \
+     | grep -qiE "$FM_TMUX_BUSY_REGEX_DEFAULT"; then
+    fail "qwen's busy token leaked into the harness-agnostic default"
+  fi
+  # fm-watch mirrors the same shared default and must not drift from it.
+  assert_source_line "BUSY_REGEX=\${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\\.\\.\\.|Ctrl\\+c:cancel'}" \
+    "$ROOT/bin/fm-watch.sh" "fm-watch's mirror of the shared busy default drifted"
+  pass "fm-tmux-lib: the harness-agnostic busy default is untouched by the qwen adapter"
 }
 
 test_qwen_idle_placeholder_reads_as_an_empty_composer() {
@@ -584,6 +675,7 @@ test_qwen_spawn_never_writes_the_captain_settings_file
 test_qwen_spawn_preserves_a_project_owned_workspace_settings_file
 test_qwen_startup_prompt_is_dismissed_only_when_present
 test_qwen_startup_prompt_is_dismissed_when_it_arrives_late
+test_qwen_startup_prompt_is_dismissed_when_a_second_modal_follows
 test_qwen_startup_backstop_ignores_the_dialog_quoted_in_prose
 test_qwen_spawn_fails_when_the_startup_prompt_never_clears
 test_qwen_turnend_hook_requires_a_registered_workspace_token
@@ -591,8 +683,9 @@ test_qwen_teardown_removes_every_task_artifact
 test_qwen_teardown_preserves_a_project_owned_workspace_settings_file
 test_qwen_teardown_removes_its_own_file_after_qwen_rewrites_it
 test_qwen_settings_ownership_matrix
-test_qwen_dirty_check_tolerance_is_only_the_settings_file
+test_qwen_dirty_check_tolerates_firstmates_untracked_qwen_dir
 test_qwen_busy_signature_is_the_mid_turn_cancel_hint
+test_shared_busy_default_is_unchanged_by_the_qwen_adapter
 test_qwen_idle_placeholder_reads_as_an_empty_composer
 test_qwen_is_a_verified_adapter_everywhere_the_set_is_asserted
 test_qwen_detection_uses_ancestry

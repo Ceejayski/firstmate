@@ -77,12 +77,23 @@
 # busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
-# qwen's `esc to cancel` joins the shared default for the same reason grok's
-# `Ctrl+c:cancel` did: it is a distinctive ASCII mid-turn cancel hint that qwen
-# shows only while a turn is running. Keeping it here (not only in the qwen
-# entry) is what lets the submit core's busy-queued-Enter fallback, which reads
-# busy state without a recorded harness, recognize a mid-turn qwen pane.
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|esc to cancel'
+# qwen's `esc to cancel` is deliberately NOT in this shared default; it lives only
+# in the qwen entry below. This default is what the submit core's
+# busy-queued-Enter fallback reads when no harness is recorded, and it is
+# consulted for claude, codex, opencode and pi panes too. That phrase appears
+# verbatim in this repo's own tracked files (this file, the harness-adapters
+# skill, the runtime-backends verification doc), so a crewmate on ANY harness that
+# renders one of them would read as busy; the fallback would then treat a
+# genuinely swallowed Enter as delivered and fm-send would exit 0 on a steer that
+# never landed - a false SUCCESS. Putting one harness's private token here also
+# changes busy detection for every existing adapter, which the qwen adapter
+# addition must not do.
+# FOLLOW-UP (deferred, wider than an adapter addition): the better fix is to make
+# that fallback harness-AWARE. fm-send now declares the recorded harness through
+# FM_SEND_HARNESS, so fm_tmux_submit_enter_core could pass it to fm_pane_is_busy
+# instead of consulting this shared default at all, which would also narrow the
+# same pre-existing exposure carried by `Ctrl+c:cancel` and `esc (to )?interrupt`.
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
