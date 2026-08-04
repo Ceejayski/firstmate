@@ -421,6 +421,8 @@ A turn that ended in an API error produced no `Stop` event.
 Startup prompt.
 Every interactive launch raised a blocking `Built-in Provider Update` prompt whose two persistent answers write to `~/.qwen/settings.json`.
 A workspace-scoped `{"providerMetadata": null}` in `<worktree>/.qwen/settings.json` suppressed the prompt entirely; a subsequent spawn went straight to work and `~/.qwen/settings.json` was byte-unchanged.
+The shipped adapter carries the same payload in the SYSTEM layer instead, via `QWEN_CODE_SYSTEM_SETTINGS_PATH` pointing outside the worktree, so nothing firstmate writes is ever visible to the crewmate's git.
+Read from the installed 0.21.5 bundle rather than observed live: `getSystemSettingsPath()` honours that variable, and `mergeSettings(system, systemDefaults, user, workspace, isTrusted)` applies the system layer last and outside the `isTrusted` gate, so it outranks both the user and workspace layers and survives an untrusted folder.
 
 Supervision surface.
 The mid-turn footer was `.. <rotating tip> (<elapsed> · <arrow> <n> tokens · esc to cancel)` and the idle footer was `Enter to steer · Ctrl+Q to queue · YOLO mode (shift + tab to cycle)`.

@@ -102,6 +102,8 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __QWENSETTINGS__ absolute path to this task's qwen system-settings file, written
+#                  under the per-task temp root (tasktmp=) and therefore OUTSIDE the worktree
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -109,9 +111,11 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # qwen uses a firstmate-owned Qwen extension under ${QWEN_HOME:-$HOME/.qwen}/extensions,
 # a private token registry beside it, plus a gitignored .fm-qwen-turnend worktree
-# pointer and a state token. A qwen spawn also writes a gitignored per-worktree
-# .qwen/settings.json that suppresses Qwen's blocking built-in-provider-update
-# prompt, with a bounded launch-time dismissal gate as the backstop.
+# pointer and a state token - that pointer is the ONLY per-worktree file a qwen
+# spawn writes. The settings file that suppresses Qwen's blocking
+# built-in-provider-update prompt lives OUTSIDE the worktree, under the per-task
+# temp root, and is reached through QWEN_CODE_SYSTEM_SETTINGS_PATH on the launch
+# command, with a bounded launch-time dismissal gate as the backstop.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -467,13 +471,24 @@ launch_template() {
     # absent from `qwen --help` but is a real, non-hidden yargs option.
     # QWEN_CODE_SUPPRESS_YOLO_WARNING silences the sandbox-less stderr warning
     # that would otherwise be the pane's first line.
+    # QWEN_CODE_SYSTEM_SETTINGS_PATH points qwen's SYSTEM settings layer at a
+    # firstmate-owned file under the per-task temp root, which is what suppresses
+    # the blocking built-in-provider-update prompt. It rides the launch command
+    # rather than a separate exported env var so it is part of the one literal the
+    # backend sends to the pane, and therefore cannot be lost by a backend that
+    # starts the agent without inheriting a prior shell's environment.
+    # Verified in qwen 0.21.5: mergeSettings merges systemDefaults, user,
+    # workspace, system in that order, so the system layer wins over the captain's
+    # user settings, and unlike the workspace layer it is NOT gated on folder
+    # trust. Layers merge per key, so a file holding only providerMetadata changes
+    # only that key.
     # --fallback-model exists and would auto-retry a capacity error on another
     # model, but it is deliberately NOT passed: firstmate dispatches one concrete
     # profile, and a silent model swap would make the recorded model wrong.
     # qwen's turn-end signal does NOT ride the launch command - it is a Stop hook
     # installed below (firstmate-owned extension + per-task pointer), so the
     # template is identical for ship/scout/secondmate.
-    qwen) printf '%s' 'QWEN_CODE_SUPPRESS_YOLO_WARNING=1 qwen --yolo __MODELFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    qwen) printf '%s' 'QWEN_CODE_SYSTEM_SETTINGS_PATH=__QWENSETTINGS__ QWEN_CODE_SUPPRESS_YOLO_WARNING=1 qwen --yolo __MODELFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1213,12 +1228,12 @@ kimi_capture() {
 }
 
 # BACKSTOP for qwen's blocking "Built-in Provider Update" prompt. The primary
-# defense is the per-worktree settings file written with the turn-end hook above,
-# which stops the prompt from ever being raised. This gate covers the cases that
-# file cannot reach: a worktree that already had its own .qwen/settings.json, a
-# secondmate launch (which installs no per-task hook material at all), and a
-# captain who enabled folder trust for an untrusted worktree (which makes qwen
-# discard workspace settings entirely).
+# defense is the per-task system-settings file named on the launch command, which
+# stops the prompt from ever being raised. Because that layer outranks the user
+# one, is never gated on folder trust, and names no project-owned path, it reaches
+# every launch this script builds - so this gate now covers only what the launch
+# template cannot: an unverified raw launch command that carries no
+# QWEN_CODE_SYSTEM_SETTINGS_PATH, and any qwen release that stops honoring it.
 # Escape answers "Remind me later", which writes nothing and lets the brief run.
 # The Escape is strictly gated on seeing the prompt's own title, because a blind
 # Escape on an already-working pane would cancel the crewmate's first turn. That
@@ -1568,33 +1583,10 @@ EOF
         "$hook_command" > "$QWEN_EXT_DIR/qwen-extension.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-qwen-turnend"
       exclude_path '.fm-qwen-turnend'
-      # Suppress qwen's blocking "Built-in Provider Update" prompt for this task.
-      # qwen shows it on EVERY interactive launch while the bundled provider
-      # catalog differs from the version recorded in settings, and it blocks the
-      # queued brief, so an unattended crewmate would sit on it forever. Its two
-      # persistent answers ("Update all", "Skip this version") both WRITE to the
-      # captain's credential-bearing $HOME/.qwen/settings.json, so firstmate
-      # takes neither. Instead the check itself is neutralized for this worktree
-      # only: qwen merges a workspace settings file over the user one, and the
-      # check reads the merged providerMetadata namespace and skips every
-      # provider whose metadata carries no version. A workspace-scoped null
-      # namespace therefore disables the prompt without naming any provider,
-      # without changing which models exist (those come from modelProviders),
-      # and without touching a single captain-owned file.
-      # An existing project-owned .qwen/settings.json is never overwritten; that
-      # case falls through to the launch-time dismissal gate instead.
-      # This file is deliberately NOT passed to exclude_path. Unlike the
-      # firstmate-named pointers above, .qwen/settings.json is qwen's ordinary
-      # workspace-config path, and info/exclude is CLONE-COMMON: an entry written
-      # here would apply to every worktree of the project, outlive this task
-      # (nothing removes it), and silently hide a later crewmate's own edits to
-      # that file from git status, git add -A, and therefore from its commit.
-      # fm-teardown's untracked-tolerance for .qwen/ is what keeps this file from
-      # blocking a ship task's worktree return instead.
-      if [ ! -e "$WT/.qwen/settings.json" ] && [ ! -L "$WT/.qwen/settings.json" ]; then
-        mkdir -p "$WT/.qwen"
-        printf '%s\n' '{"providerMetadata": null}' > "$WT/.qwen/settings.json"
-      fi
+      # The provider-update prompt is suppressed through qwen's SYSTEM settings
+      # layer, written under the per-task temp root beside the launch command
+      # below. Nothing about that suppression belongs in the worktree, so this
+      # pointer stays the only per-worktree file a qwen spawn writes.
       ;;
   esac
 fi
@@ -1674,6 +1666,25 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+# qwen's provider-update suppression: a firstmate-owned system-settings file under
+# the per-task temp root, never inside the worktree.
+# Two failure modes this placement avoids, both of which a worktree-resident file
+# has. A clone-COMMON .git/info/exclude entry to hide it would apply to every
+# worktree of the captain's clone, outlive the task, and silently drop a later
+# crewmate's own legitimate .qwen/settings.json work. Left visible instead, an
+# ordinary `git add -A` stages it and firstmate's scratch settings land on the
+# crewmate's deliverable branch and in the PR. Outside the worktree, neither is
+# reachable, and the file is cleaned up with the rest of tasktmp by fm-teardown.
+# Unconditional: it names no project-owned path, so there is nothing to refuse to
+# overwrite, and it covers every kind - including a secondmate, which installs no
+# per-task hook material.
+case "$LAUNCH" in
+  *__QWENSETTINGS__*)
+    QWEN_SYSTEM_SETTINGS="$TASK_TMP/qwen-system-settings.json"
+    printf '%s\n' '{"providerMetadata": null}' > "$QWEN_SYSTEM_SETTINGS"
+    LAUNCH=${LAUNCH//__QWENSETTINGS__/$(shell_quote "$QWEN_SYSTEM_SETTINGS")}
+    ;;
+esac
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"

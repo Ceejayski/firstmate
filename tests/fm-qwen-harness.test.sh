@@ -166,7 +166,7 @@ EOF
 }
 
 test_qwen_launch_is_verified() {
-  local id rec out rc launch meta excl
+  local id rec out rc launch meta excl settings
   id=qwen-success-q1
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
@@ -202,23 +202,43 @@ test_qwen_launch_is_verified() {
   assert_grep '"Stop"' "$HOME_DIR/.qwen/extensions/firstmate-turn-end/qwen-extension.json" \
     "qwen turn-end extension did not register the Stop event"
 
+  # The provider-update suppression rides the launch command, so it reaches the
+  # agent through the one literal the backend sends to the pane rather than through
+  # an inherited shell environment a backend might not carry.
+  settings=$(sed -n "s/.*QWEN_CODE_SYSTEM_SETTINGS_PATH='\{0,1\}\([^' ]*\)'\{0,1\} .*/\1/p" "$CASE_DIR/launch.log")
+  [ -n "$settings" ] \
+    || fail "qwen launch did not point QWEN_CODE_SYSTEM_SETTINGS_PATH at a settings file"
+  assert_grep 'tasktmp=' "$meta" "qwen meta lost the per-task temp root that owns the settings file"
+  case "$settings" in
+    "/tmp/fm-$id"/*) : ;;
+    *) fail "qwen's system settings file is not under this task's temp root: $settings" ;;
+  esac
+  case "$settings" in
+    "$WT_DIR"/*) fail "qwen's system settings file was written inside the worktree: $settings" ;;
+  esac
+  [ "$(cat "$settings")" = '{"providerMetadata": null}' ] \
+    || fail "qwen's system settings file does not carry the provider-update suppression"
+
   excl=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
   assert_grep '.fm-qwen-turnend' "$excl" "qwen token pointer was not excluded from the worktree"
   # info/exclude is CLONE-COMMON and nothing ever removes an entry from it, so
   # excluding qwen's ordinary workspace-config path would permanently hide a later
-  # crewmate's own edits to it in every worktree of the project.
+  # crewmate's own edits to it in every worktree of the project. Keeping the file
+  # out of the worktree entirely is what makes any such entry unnecessary.
   assert_no_grep '.qwen/settings.json' "$excl" \
     "qwen spawn wrote a permanent clone-wide git exclude for a conventional project config path"
-  [ "$(git -C "$WT_DIR" status --porcelain)" = '?? .qwen/' ] \
-    || fail "qwen spawn left worktree changes beyond its own untracked .qwen/ directory"
+  assert_absent "$WT_DIR/.qwen" \
+    "qwen spawn created a .qwen path inside the worktree, which git add -A would stage into the crewmate's commit"
+  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
+    || fail "qwen spawn left the worktree dirty, which would block teardown"
   pass "fm-spawn: qwen launches interactively, unattended, and registers a guarded turn-end token"
 }
 
 # The captain's provider credentials live in the same file qwen would rewrite if
 # firstmate answered the provider-update prompt persistently. Firstmate answers it
-# by neutralizing the check per worktree instead, so that file must never change.
+# through a per-task SYSTEM settings layer instead, so that file must never change.
 test_qwen_spawn_never_writes_the_captain_settings_file() {
-  local id rec before after
+  local id rec before after launch
   id=qwen-settings-q2
   rec=$(make_spawn_case settings "$id")
   read_spawn_record "$rec"
@@ -227,13 +247,17 @@ test_qwen_spawn_never_writes_the_captain_settings_file() {
     || fail "qwen spawn should succeed"
   after=$(cat "$HOME_DIR/.qwen/settings.json")
   [ "$before" = "$after" ] || fail "qwen spawn modified the captain's credential-bearing settings file"
-  assert_grep '"providerMetadata": null' "$WT_DIR/.qwen/settings.json" \
-    "qwen spawn did not suppress the provider-update prompt for this worktree"
-  pass "fm-spawn: qwen suppresses the startup prompt per worktree and never edits captain settings"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "QWEN_CODE_SYSTEM_SETTINGS_PATH=" \
+    "qwen spawn did not point the system settings layer at its own suppression file"
+  pass "fm-spawn: qwen suppresses the startup prompt per task and never edits captain settings"
 }
 
+# A project that tracks its own .qwen/settings.json must come through a qwen spawn
+# untouched AND still get the suppression - the system layer overrides the
+# workspace one, so firstmate no longer has to choose between the two.
 test_qwen_spawn_preserves_a_project_owned_workspace_settings_file() {
-  local id rec original
+  local id rec original launch
   id=qwen-preserve-q3
   rec=$(make_spawn_case preserve "$id")
   read_spawn_record "$rec"
@@ -244,7 +268,10 @@ test_qwen_spawn_preserves_a_project_owned_workspace_settings_file() {
     || fail "qwen spawn should succeed"
   [ "$(cat "$WT_DIR/.qwen/settings.json")" = "$original" ] \
     || fail "qwen spawn overwrote a project-owned workspace settings file"
-  pass "fm-spawn: qwen never overwrites a project's own workspace settings"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "QWEN_CODE_SYSTEM_SETTINGS_PATH=" \
+    "a project-owned workspace settings file suppressed firstmate's own provider-update fix"
+  pass "fm-spawn: a project's own workspace settings survive and still get the suppression"
 }
 
 test_qwen_startup_prompt_is_dismissed_only_when_present() {
@@ -401,9 +428,9 @@ run_qwen_teardown() {
     "$TEARDOWN" "$id" "$@" >/dev/null 2>&1
 }
 
-# fm-spawn refuses to overwrite a workspace settings file it did not write, so
-# teardown must refuse to delete one. Otherwise a project's own qwen config - or
-# one the crewmate authored as its actual task - is silently destroyed.
+# fm-spawn writes no .qwen/ path in the worktree, so teardown has none to reclaim
+# and must never delete one. Otherwise a project's own qwen config - or one the
+# crewmate authored as its actual task - is silently destroyed.
 test_qwen_teardown_preserves_a_project_owned_workspace_settings_file() {
   local id rec original
   id=qwen-teardown-preserve-q7b
@@ -422,123 +449,52 @@ test_qwen_teardown_preserves_a_project_owned_workspace_settings_file() {
   pass "fm-teardown: a workspace settings file firstmate did not write survives teardown"
 }
 
-# qwen rewrites the file in place at runtime to record its own "$version", so
-# ownership cannot be an exact byte match against what spawn wrote.
-# The payload here is the EXACT text a real qwen 0.21.5 run left in a live
-# worktree: the value is a JSON NUMBER. An ownership test that tolerated only a
-# quoted string passed its own unit case and still leaked this file on every
-# real run, so this case is pinned to the observed form, not a plausible one.
-test_qwen_teardown_removes_its_own_file_after_qwen_rewrites_it() {
-  local id rec
-  id=qwen-teardown-version-q7c
-  rec=$(make_spawn_case teardown-version "$id")
-  read_spawn_record "$rec"
-  run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
-    || fail "qwen spawn should succeed before teardown"
-  # shellcheck disable=SC2016  # single quotes are deliberate: qwen's literal "$version" key, not an expansion
-  printf '{\n  "providerMetadata": null,\n  "$version": 4\n}\n' \
-    > "$WT_DIR/.qwen/settings.json"
-
-  run_qwen_teardown "$id" --force || fail "qwen teardown failed"
-  assert_absent "$WT_DIR/.qwen/settings.json" \
-    "firstmate's own workspace settings survived teardown after qwen stamped its version"
-  pass "fm-teardown: firstmate's own workspace settings are removed even after qwen rewrites them"
-}
-
-# The ownership predicate decides whether teardown deletes a file it did not
-# necessarily write, so it is worth testing directly across the whole shape
-# space rather than only through the one form an end-to-end run happens to
-# produce. Extracting it also pins its name and top-level definition.
-test_qwen_settings_ownership_matrix() {
-  local fn="$TMP_ROOT/qwen-ownership-fn.sh" probe="$TMP_ROOT/qwen-ownership.json" payload
-  sed -n '/^qwen_workspace_settings_is_firstmate_owned()/,/^}/p' "$TEARDOWN" > "$fn"
-  [ -s "$fn" ] || fail "could not extract qwen_workspace_settings_is_firstmate_owned from $TEARDOWN"
-  # shellcheck source=/dev/null
-  . "$fn"
-
-  # Firstmate's own file, in every form qwen may leave it in.
-  # shellcheck disable=SC2016  # single quotes are deliberate: qwen's literal "$version" key, not an expansion
-  for payload in \
-    '{"providerMetadata": null}' \
-    '{
-  "providerMetadata": null,
-  "$version": 4
-}' \
-    '{"providerMetadata": null, "$version": "0.21.5"}' \
-    '{"providerMetadata": null, "$version": true}' \
-    '{"providerMetadata": null, "$version": null}' \
-    '{"$version": 4, "providerMetadata": null}'; do
-    printf '%s' "$payload" > "$probe"
-    qwen_workspace_settings_is_firstmate_owned "$probe" \
-      || fail "firstmate's own settings file was not recognized as owned: $payload"
-  done
-
-  # Anything else belongs to the project or the crewmate and must survive.
-  # shellcheck disable=SC2016  # single quotes are deliberate: qwen's literal "$version" key, not an expansion
-  for payload in \
-    '{"ui":{"theme":"project-owned"}}' \
-    '{"providerMetadata": null, "ui": {"theme":"x"}}' \
-    '{"providerMetadata": {"token-plan":{"version":"abc"}}}' \
-    '{"providerMetadata": null, "hooks": {"Stop": []}}' \
-    '{"providerMetadata": null, "$version": {"a":1}}' \
-    '{"providerMetadata": null, "$version": [1,2]}' \
-    'not json at all' \
-    ''; do
-    printf '%s' "$payload" > "$probe"
-    if qwen_workspace_settings_is_firstmate_owned "$probe"; then
-      fail "a file firstmate did not write was claimed as owned and would be deleted: $payload"
-    fi
-  done
-  pass "fm-teardown: settings ownership accepts every form of firstmate's own file and no other"
-}
-
-# firstmate's own workspace settings file is untracked and NOT git-excluded, so
-# this tolerance is load-bearing: without it every qwen ship task's worktree return
-# is refused as dirty. It must therefore match what porcelain actually emits.
-# `git status --porcelain` with the default -u normal COLLAPSES a fully-untracked
-# directory to a single `?? .qwen/` line and never names the settings file, so a
-# file-form tolerance could not match at all. This runs the real filter over real
-# git output rather than pinning a regex that reads plausible.
-test_qwen_dirty_check_tolerates_firstmates_untracked_qwen_dir() {
-  local line pattern repo porcelain dirty
-  assert_source_line "  dirty=\$(printf '%s\\n' \"\$dirty_raw\" | grep -vE '^\\?\\? (\\.claude/|\\.qwen/|\\.fm-(grok|kimi|qwen)-turnend\$)' | head -1 || true)" \
-    "$TEARDOWN" "the teardown dirty-check tolerance is no longer the .qwen/ directory form"
-
+# firstmate now puts nothing under .qwen/ in the worktree, so the dirty check must
+# grant .qwen/ NO tolerance: anything a crewmate leaves there is the crewmate's own
+# work and must still refuse the return. This runs the real filter over real git
+# output rather than pinning a regex that merely reads plausible.
+test_qwen_dirty_check_grants_no_qwen_tolerance() {
+  local line pattern repo dirty
   line=$(grep -F "dirty=\$(printf '%s\\n' \"\$dirty_raw\" | grep -vE '" "$TEARDOWN") \
     || fail "could not read the dirty-check tolerance out of $TEARDOWN"
   pattern=${line#*grep -vE \'}
   pattern=${pattern%%\'*}
+  case "$pattern" in
+    *qwen/*) fail "the dirty check still tolerates a .qwen/ path firstmate no longer writes: $pattern" ;;
+  esac
 
   repo="$TMP_ROOT/dirty-tolerance"
   fm_git_init_commit "$repo"
   mkdir -p "$repo/.qwen"
-  printf '%s\n' '{"providerMetadata": null}' > "$repo/.qwen/settings.json"
-  porcelain=$(git -C "$repo" status --porcelain)
-  [ "$porcelain" = '?? .qwen/' ] \
-    || fail "git no longer collapses a fully-untracked .qwen/ to '?? .qwen/'; got: $porcelain"
-  dirty=$(printf '%s\n' "$porcelain" | grep -vE "$pattern" | head -1 || true)
-  [ -z "$dirty" ] \
-    || fail "teardown would refuse a qwen worktree return over firstmate's own settings file: $dirty"
-
-  # A crewmate's real uncommitted work still refuses.
-  printf 'work\n' > "$repo/crewmate-work.txt"
+  printf '%s\n' '{"ui":{"theme":"crewmate-authored"}}' > "$repo/.qwen/settings.json"
   dirty=$(git -C "$repo" status --porcelain | grep -vE "$pattern" | head -1 || true)
-  [ -n "$dirty" ] || fail "teardown tolerated a crewmate's uncommitted work outside .qwen/"
-  pass "fm-teardown: the dirty check tolerates firstmate's untracked .qwen/ as git actually reports it"
+  [ -n "$dirty" ] \
+    || fail "teardown would silently discard a crewmate's uncommitted .qwen/ work"
+
+  # firstmate's own per-worktree pointer is still tolerated.
+  rm -rf "$repo/.qwen"
+  printf 'token=fm.aaaaaaaaaaaa\n' > "$repo/.fm-qwen-turnend"
+  dirty=$(git -C "$repo" status --porcelain | grep -vE "$pattern" | head -1 || true)
+  [ -z "$dirty" ] \
+    || fail "teardown would refuse a qwen worktree return over firstmate's own token pointer: $dirty"
+  pass "fm-teardown: the dirty check tolerates firstmate's own pointer and no .qwen/ path"
 }
 
 test_qwen_teardown_removes_every_task_artifact() {
-  local id rec token
+  local id rec token settings
   id=qwen-teardown-q7
   rec=$(make_spawn_case teardown "$id")
   read_spawn_record "$rec"
   run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
     || fail "qwen spawn should succeed before teardown"
   token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-qwen-turnend")
+  settings=$(sed -n "s/.*QWEN_CODE_SYSTEM_SETTINGS_PATH='\{0,1\}\([^' ]*\)'\{0,1\} .*/\1/p" "$CASE_DIR/launch.log")
+  assert_present "$settings" "qwen spawn never wrote its system settings file"
 
   run_qwen_teardown "$id" --force || fail "qwen teardown failed"
   assert_absent "$WT_DIR/.fm-qwen-turnend" "qwen token pointer survived teardown"
-  assert_absent "$WT_DIR/.qwen/settings.json" "qwen workspace settings survived teardown"
+  # The settings file lives under tasktmp, so it goes with the rest of that root.
+  assert_absent "$settings" "qwen's system settings file survived teardown"
   assert_absent "$HOME_DIR/.qwen/fm-turn-end.d/$token" "qwen registry token survived teardown"
   assert_absent "$HOME_DIR/state/$id.qwen-turnend-token" "qwen token state survived teardown"
   pass "fm-teardown: every qwen task artifact is removed"
@@ -681,9 +637,7 @@ test_qwen_spawn_fails_when_the_startup_prompt_never_clears
 test_qwen_turnend_hook_requires_a_registered_workspace_token
 test_qwen_teardown_removes_every_task_artifact
 test_qwen_teardown_preserves_a_project_owned_workspace_settings_file
-test_qwen_teardown_removes_its_own_file_after_qwen_rewrites_it
-test_qwen_settings_ownership_matrix
-test_qwen_dirty_check_tolerates_firstmates_untracked_qwen_dir
+test_qwen_dirty_check_grants_no_qwen_tolerance
 test_qwen_busy_signature_is_the_mid_turn_cancel_hint
 test_shared_busy_default_is_unchanged_by_the_qwen_adapter
 test_qwen_idle_placeholder_reads_as_an_empty_composer

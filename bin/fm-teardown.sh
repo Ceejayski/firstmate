@@ -212,52 +212,11 @@ remove_qwen_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
-# fm-spawn refuses to overwrite a .qwen/settings.json it did not write, because
-# that file may be project-owned or authored by the crewmate as part of its task.
-# Teardown holds the same ownership line: it removes only firstmate's own file.
-# The marker is the content spawn writes - providerMetadata set to null and
-# nothing else of firstmate's. qwen rewrites the file in place at runtime to add
-# its own "$version" key, so that one key is tolerated and no other addition is.
-# That key's VALUE is a JSON number in practice (qwen 0.21.5 writes
-# {"providerMetadata": null, "$version": 4}), so the tolerance must accept any
-# JSON scalar - number, string, boolean, or null - rather than a quoted string
-# only. Matching a quoted string alone silently stopped recognizing firstmate's
-# own file after any real qwen run, which leaked it into the returned pool
-# worktree for whatever task picked that worktree up next.
-# The check is structural rather than a strip-and-compare so a value can never
-# smuggle extra members past it: the compacted object must be exactly
-# providerMetadata:null, optionally plus one $version whose value carries no
-# JSON structural character. Anything else is somebody else's file and is kept.
-qwen_workspace_settings_is_firstmate_owned() {
-  local file=$1 compact rest
-  compact=$(tr -d ' \t\r\n' < "$file" 2>/dev/null) || return 1
-  # shellcheck disable=SC2016  # single quotes are deliberate: "$version" is qwen's literal JSON key, not an expansion
-  case "$compact" in
-    '{"providerMetadata":null}') return 0 ;;
-    '{"providerMetadata":null,"$version":'*'}')
-      rest=${compact#'{"providerMetadata":null,"$version":'}
-      rest=${rest%\}}
-      ;;
-    '{"$version":'*',"providerMetadata":null}')
-      rest=${compact#'{"$version":'}
-      rest=${rest%',"providerMetadata":null}'}
-      ;;
-    *) return 1 ;;
-  esac
-  case "$rest" in
-    ''|*[][,{}:]*) return 1 ;;
-  esac
-  return 0
-}
-
-remove_qwen_workspace_settings() {
-  local file=$1
-  [ -f "$file" ] || return 0
-  [ ! -L "$file" ] || return 0
-  qwen_workspace_settings_is_firstmate_owned "$file" || return 0
-  rm -f "$file"
-  rmdir "${file%/*}" 2>/dev/null || true
-}
+# A qwen spawn writes no .qwen/ path inside the worktree at all: its
+# provider-update suppression is a system-settings file under the per-task temp
+# root, removed with the rest of tasktmp below. So teardown has no worktree
+# settings file to reclaim, and must never delete a .qwen/settings.json - any such
+# file is the project's or was authored by the crewmate as part of its task.
 
 validate_pr_poll_cleanup() {
   local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
@@ -736,12 +695,11 @@ validate_worktree_teardown_safety() {
     return 1
   fi
   # Untracked harness scratch that firstmate itself put in the worktree is not the
-  # crewmate's work and must not refuse the return. The .qwen/ entry is the
-  # DIRECTORY form, like .claude/, because that is what porcelain actually emits:
-  # `git status --porcelain` with the default -u normal collapses a fully-untracked
-  # directory to a single `?? .qwen/` line and never lists the settings file
-  # individually, so a tolerance naming the file could not match at all.
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.qwen/|\.fm-(grok|kimi|qwen)-turnend$)' | head -1 || true)
+  # crewmate's work and must not refuse the return. No .qwen/ entry belongs here:
+  # a qwen spawn writes nothing under .qwen/ in the worktree (its settings file
+  # lives under the per-task temp root), so anything a crewmate leaves there is
+  # the crewmate's own work and must still refuse.
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi|qwen)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1074,7 +1032,6 @@ cleanup_firstmate_home_children() {
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend" \
           "$child_wt/.fm-qwen-turnend"
-        remove_qwen_workspace_settings "$child_wt/.qwen/settings.json"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -1082,7 +1039,6 @@ cleanup_firstmate_home_children() {
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend" \
         "$child_wt/.fm-qwen-turnend"
-      remove_qwen_workspace_settings "$child_wt/.qwen/settings.json"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -1196,7 +1152,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-qwen-turnend"
-    remove_qwen_workspace_settings "$WT/.qwen/settings.json"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -1210,7 +1165,6 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-qwen-turnend"
-  remove_qwen_workspace_settings "$WT/.qwen/settings.json"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
