@@ -1224,16 +1224,28 @@ kimi_capture() {
 # Escape on an already-working pane would cancel the crewmate's first turn. That
 # title is localized, so this is a backstop and never the primary defense.
 # Absence of the prompt is the normal, expected case and is never an error.
+# The gate watches the WHOLE bounded window rather than standing down the moment
+# the composer renders: qwen can raise this modal after the TUI has mounted, and
+# a backstop that disarms on that race is no backstop at all - the crewmate would
+# sit behind a blocking dialog forever in a pane that reads healthy. The cost of
+# that choice lands on EVERY qwen spawn, not only the fallback cases: a spawn
+# that never raises the prompt now waits out the full window
+# (FM_QWEN_STARTUP_POLLS x FM_QWEN_POLL_INTERVAL, 20s by default) before the
+# brief is sent. Only a launch that actually showed and cleared the prompt
+# returns early. The primary defense - the per-worktree .qwen/settings.json that
+# stops the prompt from being raised - is unchanged and pays no dialog cost.
 qwen_dismiss_startup_prompt() {
   local pane i=0 max=${FM_QWEN_STARTUP_POLLS:-40} interval=${FM_QWEN_POLL_INTERVAL:-0.5}
+  local escapes=0 max_escapes=${FM_QWEN_STARTUP_ESCAPES:-3}
   while [ "$i" -lt "$max" ]; do
     pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
     if printf '%s\n' "$pane" | grep -Fq 'Built-in Provider Update'; then
-      spawn_send_key "$T" Escape
-      return 0
-    fi
-    # Any evidence the session is past startup means the prompt will not appear.
-    if printf '%s\n' "$pane" | grep -qiE 'esc to cancel|Type your message'; then
+      # Still up: Escape it, bounded, and keep watching until it is verifiably gone.
+      if [ "$escapes" -lt "$max_escapes" ]; then
+        spawn_send_key "$T" Escape
+        escapes=$((escapes + 1))
+      fi
+    elif [ "$escapes" -gt 0 ]; then
       return 0
     fi
     i=$((i + 1))

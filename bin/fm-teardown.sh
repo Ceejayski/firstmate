@@ -212,6 +212,29 @@ remove_qwen_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
+# fm-spawn refuses to overwrite a .qwen/settings.json it did not write, because
+# that file may be project-owned or authored by the crewmate as part of its task.
+# Teardown holds the same ownership line: it removes only firstmate's own file.
+# The marker is the content spawn writes - providerMetadata set to null and
+# nothing else of firstmate's. qwen rewrites the file in place at runtime to add
+# its own "$version" key, so that one key is tolerated and no other addition is.
+qwen_workspace_settings_is_firstmate_owned() {
+  local file=$1 compact
+  compact=$(tr -d ' \t\r\n' < "$file" 2>/dev/null) || return 1
+  compact=$(printf '%s' "$compact" \
+    | sed -e 's/"[$]version":"[^"]*",//' -e 's/,"[$]version":"[^"]*"//')
+  [ "$compact" = '{"providerMetadata":null}' ]
+}
+
+remove_qwen_workspace_settings() {
+  local file=$1
+  [ -f "$file" ] || return 0
+  [ ! -L "$file" ] || return 0
+  qwen_workspace_settings_is_firstmate_owned "$file" || return 0
+  rm -f "$file"
+  rmdir "${file%/*}" 2>/dev/null || true
+}
+
 validate_pr_poll_cleanup() {
   local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
   fm_task_id_path_safe "$id" || return 0
@@ -688,7 +711,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.qwen/|\.fm-(grok|kimi|qwen)-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.qwen/settings\.json$|\.fm-(grok|kimi|qwen)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1020,14 +1043,16 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend" \
-          "$child_wt/.fm-qwen-turnend" "$child_wt/.qwen/settings.json"
+          "$child_wt/.fm-qwen-turnend"
+        remove_qwen_workspace_settings "$child_wt/.qwen/settings.json"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend" \
-        "$child_wt/.fm-qwen-turnend" "$child_wt/.qwen/settings.json"
+        "$child_wt/.fm-qwen-turnend"
+      remove_qwen_workspace_settings "$child_wt/.qwen/settings.json"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -1140,8 +1165,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       fi
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-qwen-turnend" \
-      "$WT/.qwen/settings.json"
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-qwen-turnend"
+    remove_qwen_workspace_settings "$WT/.qwen/settings.json"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -1154,8 +1179,8 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-qwen-turnend" \
-    "$WT/.qwen/settings.json"
+    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-qwen-turnend"
+  remove_qwen_workspace_settings "$WT/.qwen/settings.json"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks

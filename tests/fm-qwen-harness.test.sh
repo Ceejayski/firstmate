@@ -13,8 +13,8 @@ PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 assert_source_line() {
-  local line=$1
-  grep -Fqx -- "$line" "$SPAWN" || fail "existing launch template changed: $line"
+  local line=$1 file=${2:-$SPAWN} why=${3:-}
+  grep -Fqx -- "$line" "$file" || fail "${why:-existing launch template changed}: $line"
 }
 
 # The whole point of adding an adapter is that no other adapter moves. Pin every
@@ -30,8 +30,9 @@ test_existing_launch_templates_are_byte_pinned() {
   pass "fm-spawn: every pre-existing adapter's launch template stays byte-pinned"
 }
 
-# A fake tmux that renders the two qwen screens this adapter must tell apart: the
-# blocking built-in-provider-update prompt, and an ordinary working session.
+# A fake tmux that renders the qwen screens this adapter must tell apart: the
+# blocking built-in-provider-update prompt, an ordinary working session, and the
+# race where the composer renders first and the prompt arrives after it.
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -46,6 +47,11 @@ fake_screen() {
       ;;
     working)
       printf '  .. Counting electrons... (12s \xc2\xb7 \xe2\x86\x91 909 tokens \xc2\xb7 esc to cancel)\n*   Type your message or @path/to/file\n'
+      ;;
+    late)
+      # The composer is already up; the modal lands on the NEXT poll.
+      printf '  .. Counting electrons... (12s \xc2\xb7 \xe2\x86\x91 909 tokens \xc2\xb7 esc to cancel)\n*   Type your message or @path/to/file\n'
+      printf 'dialog\n' > "$FM_FAKE_QWEN_STATE"
       ;;
     *)
       printf 'shell starting\n$ \n'
@@ -121,7 +127,7 @@ run_spawn() {
     FM_FAKE_KEY_LOG="$case_dir/key.log" \
     FM_FAKE_QWEN_STATE="$case_dir/qwen.state" \
     FM_FAKE_QWEN_AFTER_LAUNCH="${FM_FAKE_QWEN_AFTER_LAUNCH:-working}" \
-    FM_QWEN_STARTUP_POLLS=2 FM_QWEN_POLL_INTERVAL=0 \
+    FM_QWEN_STARTUP_POLLS="${FM_QWEN_STARTUP_POLLS:-2}" FM_QWEN_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness qwen "$@" 2>&1
 }
@@ -271,6 +277,80 @@ test_qwen_turnend_hook_requires_a_registered_workspace_token() {
   pass "fm-spawn: the qwen turn-end hook is silent and fires only for a registered task"
 }
 
+# The backstop must survive the race it exists for: a modal that arrives AFTER the
+# composer has already rendered. A gate that stands down on the first idle-looking
+# capture would leave the crewmate wedged behind a pane that reads healthy.
+test_qwen_startup_prompt_is_dismissed_when_it_arrives_late() {
+  local id rec keys
+  id=qwen-latedialog-q4b
+  rec=$(make_spawn_case latedialog "$id")
+  read_spawn_record "$rec"
+  FM_FAKE_QWEN_AFTER_LAUNCH=late FM_QWEN_STARTUP_POLLS=4 \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
+    || fail "qwen spawn should succeed through a late startup prompt"
+  keys=$(cat "$CASE_DIR/key.log")
+  assert_contains "$keys" "Escape" \
+    "a provider-update prompt raised after the composer rendered was never dismissed"
+  pass "fm-spawn: the qwen startup-prompt backstop still catches a late prompt"
+}
+
+run_qwen_teardown() {
+  local id=$1; shift
+  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" "$@" >/dev/null 2>&1
+}
+
+# fm-spawn refuses to overwrite a workspace settings file it did not write, so
+# teardown must refuse to delete one. Otherwise a project's own qwen config - or
+# one the crewmate authored as its actual task - is silently destroyed.
+test_qwen_teardown_preserves_a_project_owned_workspace_settings_file() {
+  local id rec original
+  id=qwen-teardown-preserve-q7b
+  rec=$(make_spawn_case teardown-preserve "$id")
+  read_spawn_record "$rec"
+  mkdir -p "$WT_DIR/.qwen"
+  original='{"ui":{"theme":"project-owned"}}'
+  printf '%s\n' "$original" > "$WT_DIR/.qwen/settings.json"
+  run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
+    || fail "qwen spawn should succeed before teardown"
+
+  run_qwen_teardown "$id" --force || fail "qwen teardown failed"
+  assert_absent "$WT_DIR/.fm-qwen-turnend" "qwen teardown did not run its worktree cleanup"
+  [ "$(cat "$WT_DIR/.qwen/settings.json" 2>/dev/null)" = "$original" ] \
+    || fail "qwen teardown destroyed a project-owned workspace settings file"
+  pass "fm-teardown: a workspace settings file firstmate did not write survives teardown"
+}
+
+# qwen rewrites the file in place at runtime to record its own "$version", so
+# ownership cannot be an exact byte match against what spawn wrote.
+test_qwen_teardown_removes_its_own_file_after_qwen_rewrites_it() {
+  local id rec
+  id=qwen-teardown-version-q7c
+  rec=$(make_spawn_case teardown-version "$id")
+  read_spawn_record "$rec"
+  run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" >/dev/null \
+    || fail "qwen spawn should succeed before teardown"
+  # shellcheck disable=SC2016  # single quotes are deliberate: qwen's literal "$version" key, not an expansion
+  printf '%s\n' '{"providerMetadata": null, "$version": "0.21.5"}' \
+    > "$WT_DIR/.qwen/settings.json"
+
+  run_qwen_teardown "$id" --force || fail "qwen teardown failed"
+  assert_absent "$WT_DIR/.qwen/settings.json" \
+    "firstmate's own workspace settings survived teardown after qwen stamped its version"
+  pass "fm-teardown: firstmate's own workspace settings are removed even after qwen rewrites them"
+}
+
+# The tolerance the dirty check grants must stay pinned to the one file firstmate
+# writes; uncommitted work a crewmate left elsewhere under .qwen/ must still refuse.
+test_qwen_dirty_check_tolerance_is_only_the_settings_file() {
+  assert_source_line "  dirty=\$(printf '%s\\n' \"\$dirty_raw\" | grep -vE '^\\?\\? (\\.claude/|\\.qwen/settings\\.json\$|\\.fm-(grok|kimi|qwen)-turnend\$)' | head -1 || true)" \
+    "$TEARDOWN"
+  pass "fm-teardown: the untracked dirty-check tolerance names only .qwen/settings.json"
+}
+
 test_qwen_teardown_removes_every_task_artifact() {
   local id rec token
   id=qwen-teardown-q7
@@ -280,11 +360,7 @@ test_qwen_teardown_removes_every_task_artifact() {
     || fail "qwen spawn should succeed before teardown"
   token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-qwen-turnend")
 
-  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
-    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
-    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "qwen teardown failed"
+  run_qwen_teardown "$id" --force || fail "qwen teardown failed"
   assert_absent "$WT_DIR/.fm-qwen-turnend" "qwen token pointer survived teardown"
   assert_absent "$WT_DIR/.qwen/settings.json" "qwen workspace settings survived teardown"
   assert_absent "$HOME_DIR/.qwen/fm-turn-end.d/$token" "qwen registry token survived teardown"
@@ -398,8 +474,12 @@ test_qwen_launch_is_verified
 test_qwen_spawn_never_writes_the_captain_settings_file
 test_qwen_spawn_preserves_a_project_owned_workspace_settings_file
 test_qwen_startup_prompt_is_dismissed_only_when_present
+test_qwen_startup_prompt_is_dismissed_when_it_arrives_late
 test_qwen_turnend_hook_requires_a_registered_workspace_token
 test_qwen_teardown_removes_every_task_artifact
+test_qwen_teardown_preserves_a_project_owned_workspace_settings_file
+test_qwen_teardown_removes_its_own_file_after_qwen_rewrites_it
+test_qwen_dirty_check_tolerance_is_only_the_settings_file
 test_qwen_busy_signature_is_the_mid_turn_cancel_hint
 test_qwen_idle_placeholder_reads_as_an_empty_composer
 test_qwen_is_a_verified_adapter_everywhere_the_set_is_asserted

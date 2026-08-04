@@ -423,6 +423,9 @@ qwen merges a workspace settings file over the user one, and the update check sk
 Verified live: with that file in place a fresh spawn went straight to work, and `~/.qwen/settings.json` was byte-unchanged.
 An existing project-owned `<worktree>/.qwen/settings.json` is never overwritten; that case, a secondmate launch (which installs no per-task hook material at all), and a captain who has enabled folder trust for an untrusted worktree (which makes qwen discard workspace settings entirely) all fall through to `fm-spawn`'s bounded launch-time backstop, which sends `Escape` only after seeing the prompt's own title.
 That title is localized, so treat the keystroke as the backstop and the settings file as the real fix.
+The backstop watches the whole bounded window (`FM_QWEN_STARTUP_POLLS` x `FM_QWEN_POLL_INTERVAL`, 20s by default) rather than standing down once the composer renders, because qwen can raise the modal after the TUI has mounted; it re-checks that the title is gone after each `Escape` and gives up after `FM_QWEN_STARTUP_ESCAPES` (3) attempts.
+The cost of that lands on EVERY qwen spawn: a launch that never raises the prompt still waits out the full window before the brief is sent, and only a launch that showed and cleared the prompt returns early.
+Teardown removes that worktree file only when it is still firstmate's own (`providerMetadata` null and nothing else, tolerating the `$version` key qwen stamps in at runtime); a project-owned or crewmate-authored `.qwen/settings.json` survives teardown untouched, matching spawn's refusal to overwrite one.
 If a qwen pane is ever found parked on this prompt during recovery, `Escape` is the safe answer - never `1` or `2`.
 
 **Folder trust silently downgrades autonomy.**
