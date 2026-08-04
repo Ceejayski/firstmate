@@ -80,7 +80,12 @@ case "${1:-}" in
       exit 0
     fi
     case " $* " in
-      *' Escape '*) printf '%s\n' "Escape" >> "$FM_FAKE_KEY_LOG"; printf 'working\n' > "$FM_FAKE_QWEN_STATE" ;;
+      *' Escape '*)
+        printf '%s\n' "Escape" >> "$FM_FAKE_KEY_LOG"
+        # A qwen that ignores Escape: the modal stays up no matter the budget.
+        [ "${FM_FAKE_QWEN_STICKY_DIALOG:-0}" = 1 ] \
+          || printf 'working\n' > "$FM_FAKE_QWEN_STATE"
+        ;;
       *' Enter '*) printf '%s\n' "${FM_FAKE_QWEN_AFTER_LAUNCH:-working}" > "$FM_FAKE_QWEN_STATE" ;;
     esac
     exit 0
@@ -127,6 +132,7 @@ run_spawn() {
     FM_FAKE_KEY_LOG="$case_dir/key.log" \
     FM_FAKE_QWEN_STATE="$case_dir/qwen.state" \
     FM_FAKE_QWEN_AFTER_LAUNCH="${FM_FAKE_QWEN_AFTER_LAUNCH:-working}" \
+    FM_FAKE_QWEN_STICKY_DIALOG="${FM_FAKE_QWEN_STICKY_DIALOG:-0}" \
     FM_QWEN_STARTUP_POLLS="${FM_QWEN_STARTUP_POLLS:-2}" FM_QWEN_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness qwen "$@" 2>&1
@@ -292,6 +298,31 @@ test_qwen_startup_prompt_is_dismissed_when_it_arrives_late() {
   assert_contains "$keys" "Escape" \
     "a provider-update prompt raised after the composer rendered was never dismissed"
   pass "fm-spawn: the qwen startup-prompt backstop still catches a late prompt"
+}
+
+# A dialog that outlives the Escape budget means the brief was never delivered.
+# Reporting "spawned" for that pane is a false success: firstmate and every
+# script that trusts the exit code would supervise a crewmate that never got its
+# task. The gate must fail closed instead.
+test_qwen_spawn_fails_when_the_startup_prompt_never_clears() {
+  local id rec out rc status
+  id=qwen-stuckdialog-q4c
+  rec=$(make_spawn_case stuckdialog "$id")
+  read_spawn_record "$rec"
+  out=$(FM_FAKE_QWEN_AFTER_LAUNCH=dialog FM_FAKE_QWEN_STICKY_DIALOG=1 \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a qwen spawn wedged behind the provider-update dialog exited 0"
+  assert_not_contains "$out" "spawned $id" \
+    "a qwen spawn that never delivered its brief still reported success"
+  assert_contains "$out" "built-in-provider-update dialog" \
+    "the spawn failure did not name the blocker a supervisor has to clear"
+  status="$HOME_DIR/state/$id.status"
+  grep -q '^failed: ' "$status" 2>/dev/null \
+    || fail "a wedged qwen spawn left no failed: line on the task status file"
+  assert_grep 'built-in-provider-update dialog' "$status" \
+    "the failed: line did not name the blocking dialog"
+  pass "fm-spawn: a qwen startup prompt that never clears fails the spawn loudly"
 }
 
 run_qwen_teardown() {
@@ -526,6 +557,7 @@ test_qwen_spawn_never_writes_the_captain_settings_file
 test_qwen_spawn_preserves_a_project_owned_workspace_settings_file
 test_qwen_startup_prompt_is_dismissed_only_when_present
 test_qwen_startup_prompt_is_dismissed_when_it_arrives_late
+test_qwen_spawn_fails_when_the_startup_prompt_never_clears
 test_qwen_turnend_hook_requires_a_registered_workspace_token
 test_qwen_teardown_removes_every_task_artifact
 test_qwen_teardown_preserves_a_project_owned_workspace_settings_file

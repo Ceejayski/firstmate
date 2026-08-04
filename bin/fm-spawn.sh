@@ -1234,13 +1234,22 @@ kimi_capture() {
 # brief is sent. Only a launch that actually showed and cleared the prompt
 # returns early. The primary defense - the per-worktree .qwen/settings.json that
 # stops the prompt from being raised - is unchanged and pays no dialog cost.
+# Three outcomes, decided on captured evidence rather than on whether an Escape
+# was ever sent: the prompt was never raised (0, the normal case), the prompt was
+# raised and is verifiably gone (0), or a final capture taken after the window and
+# the Escape budget are spent STILL shows the title (1). That last case means the
+# pane is wedged behind a modal and the brief cannot be delivered, so it is a
+# spawn failure, not a warning - the caller must not report success for it. The
+# final capture is what decides, so a prompt cleared on the very last poll still
+# passes.
 qwen_dismiss_startup_prompt() {
   local pane i=0 max=${FM_QWEN_STARTUP_POLLS:-40} interval=${FM_QWEN_POLL_INTERVAL:-0.5}
-  local escapes=0 max_escapes=${FM_QWEN_STARTUP_ESCAPES:-3}
+  local escapes=0 max_escapes=${FM_QWEN_STARTUP_ESCAPES:-3} seen=0
   while [ "$i" -lt "$max" ]; do
     pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
     if printf '%s\n' "$pane" | grep -Fq 'Built-in Provider Update'; then
       # Still up: Escape it, bounded, and keep watching until it is verifiably gone.
+      seen=1
       if [ "$escapes" -lt "$max_escapes" ]; then
         spawn_send_key "$T" Escape
         escapes=$((escapes + 1))
@@ -1251,7 +1260,14 @@ qwen_dismiss_startup_prompt() {
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
-  return 0
+  # Never seen at all: nothing to clear, and nothing to re-confirm.
+  [ "$seen" -eq 1 ] || return 0
+  # Seen and still up on the last poll. Give the final Escape one settle interval,
+  # then let a fresh capture - not the loop's last one - deliver the verdict.
+  sleep "$interval"
+  pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
+  printf '%s\n' "$pane" | grep -Fq 'Built-in Provider Update' || return 0
+  return 1
 }
 
 kimi_capture_has_empty_composer() {  # <plain-pane-capture>
@@ -1297,6 +1313,14 @@ kimi_wait_for_delivery() {
 }
 
 kimi_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
+# Same contract as kimi_spawn_fail, for the qwen startup gate: record the failure
+# on the task's own status file so a supervisor reading state sees it, and name
+# the pane to inspect on stderr.
+qwen_spawn_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
 }
@@ -1644,7 +1668,10 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = qwen ]; then
-  qwen_dismiss_startup_prompt
+  if ! qwen_dismiss_startup_prompt; then
+    qwen_spawn_fail "qwen is still showing its blocking built-in-provider-update dialog after ${FM_QWEN_STARTUP_ESCAPES:-3} Escapes; the brief was never delivered"
+    exit 1
+  fi
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

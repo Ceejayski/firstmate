@@ -1138,8 +1138,12 @@ inject_msg() {  # <message> [state]
   # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
   # buffer is preserved (strict) rather than cleared.
   # Dispatches through fm_backend_send_text_submit (bin/fm-backend.sh): for
-  # backend=tmux this calls fm_backend_tmux_send_text_submit, a verbatim
-  # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
+  # backend=tmux this calls fm_backend_tmux_send_text_submit, which re-exports
+  # fm_tmux_submit_core and, when the caller declares the target's recorded
+  # harness in FM_SEND_HARNESS and that harness has a verified unstyled
+  # empty-composer placeholder, supplies that placeholder to the shared composer
+  # reader for the call. Only a harness that registers one is affected, and an
+  # operator's own FM_COMPOSER_IDLE_RE wins.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
