@@ -292,19 +292,35 @@ test_ahoy_owns_only_the_visible_session_recap
 test_ahoy_scans_visible_history_for_open_decisions
 test_ahoy_user_role_injections_share_one_marker
 
-test_public_skills_contain_no_private_project_paths() {
-  # Public skills in skills/*/SKILL.md must be standalone - no references to private project paths,
-  # FM_HOME-relative state, or captain-private data directories.
-  local skill_file private_pattern
+# Leaks that would stop a public skill in skills/*/SKILL.md from standing on its
+# own once installed into someone else's project: this repo's private trees, its
+# helper scripts, its FM_HOME-relative state, and its house vocabulary.
+# Each entry is "<description>|<ERE>". The generic directory names are matched
+# only in path-like context (rooted at /, ~/, ./, $VAR/, or opening a code span)
+# so ordinary prose - "loading state/empty state", "tailwind config/theme tokens"
+# - does not trip a guard about paths.
+PUBLIC_SKILL_LEAKS=(
+  'the private .agents/ skill tree|(^|[^[:alnum:]_./-])\.agents/'
+  'a private bin/fm-* helper script|(^|[^[:alnum:]_./-])bin/fm-'
+  'FM_HOME-relative state|FM_HOME'
+  'a private project path|(`|~/|\./|\$[A-Za-z_][A-Za-z0-9_]*/|/)(data|state|config|projects)/'
+  'firstmate house vocabulary|(^|[^[:alnum:]])(firstmate|first mate|second mate|crewmate|captain)([^[:alnum:]]|$)'
+)
+
+test_public_skills_are_standalone() {
+  local skill_file entry description pattern hit
   for skill_file in "$ROOT"/skills/*/SKILL.md; do
     [ -f "$skill_file" ] || continue
-    # Check for common private path patterns that would break portability.
-    private_pattern='data/\|state/\|config/\|projects/\|FM_HOME'
-    if grep -q "$private_pattern" "$skill_file"; then
-      fail "Public skill $skill_file references private paths (data/, state/, config/, projects/, or FM_HOME)"
-    fi
+    for entry in "${PUBLIC_SKILL_LEAKS[@]}"; do
+      description=${entry%%|*}
+      pattern=${entry#*|}
+      hit=$(grep -nEi "$pattern" "$skill_file" | head -1)
+      if [ -n "$hit" ]; then
+        fail "Public skill ${skill_file#"$ROOT"/} references $description: $hit"
+      fi
+    done
   done
-  pass "Public skills contain no private project paths"
+  pass "Public skills are standalone"
 }
 
-test_public_skills_contain_no_private_project_paths
+test_public_skills_are_standalone
