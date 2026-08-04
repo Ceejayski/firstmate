@@ -291,3 +291,20 @@ test_ahoy_readme_uses_cross_harness_convention
 test_ahoy_owns_only_the_visible_session_recap
 test_ahoy_scans_visible_history_for_open_decisions
 test_ahoy_user_role_injections_share_one_marker
+
+test_public_skills_contain_no_private_project_paths() {
+  # Public skills in skills/*/SKILL.md must be standalone - no references to private project paths,
+  # FM_HOME-relative state, or captain-private data directories.
+  local skill_file private_pattern
+  for skill_file in "$ROOT"/skills/*/SKILL.md; do
+    [ -f "$skill_file" ] || continue
+    # Check for common private path patterns that would break portability.
+    private_pattern='data/\|state/\|config/\|projects/\|FM_HOME'
+    if grep -q "$private_pattern" "$skill_file"; then
+      fail "Public skill $skill_file references private paths (data/, state/, config/, projects/, or FM_HOME)"
+    fi
+  done
+  pass "Public skills contain no private project paths"
+}
+
+test_public_skills_contain_no_private_project_paths
