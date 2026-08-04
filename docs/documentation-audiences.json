@@ -332,11 +332,11 @@
       "audience": "operator-current"
     },
     {
-      "path": "skills/stow/SKILL.md",
+      "path": "skills/showcase/SKILL.md",
       "audience": "public-product"
     },
     {
-      "path": "skills/showcase/SKILL.md",
+      "path": "skills/stow/SKILL.md",
       "audience": "public-product"
     }
   ]
