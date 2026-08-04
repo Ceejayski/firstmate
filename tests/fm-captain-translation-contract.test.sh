@@ -300,11 +300,11 @@ test_ahoy_user_role_injections_share_one_marker
 # so ordinary prose - "loading state/empty state", "tailwind config/theme tokens"
 # - does not trip a guard about paths.
 PUBLIC_SKILL_LEAKS=(
-  'the private .agents/ skill tree|(^|[^[:alnum:]_./-])\.agents/'
-  'a private bin/fm-* helper script|(^|[^[:alnum:]_./-])bin/fm-'
+  'the private .agents/ skill tree|(^|[^[:alnum:]_-])\.agents/'
+  'a private bin/fm-* helper script|(^|[^[:alnum:]_-])bin/fm-'
   'FM_HOME-relative state|FM_HOME'
   'a private project path|(`|~/|\./|\$[A-Za-z_][A-Za-z0-9_]*/|/)(data|state|config|projects)/'
-  'firstmate house vocabulary|(^|[^[:alnum:]])(firstmate|first mate|second mate|crewmate|captain)([^[:alnum:]]|$)'
+  'firstmate house vocabulary|(^|[^[:alnum:]])(firstmate|first mate|second mate|crewmate|captain)'
 )
 
 test_public_skills_are_standalone() {
