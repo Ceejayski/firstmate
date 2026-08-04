@@ -30,6 +30,7 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Claude, Codex, OpenCode, and Grok were observed under their own process names.
 Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
+Qwen Code 0.21.5 was observed under `qwen` on 2026-08-04 through a real isolated `fm-spawn.sh` launch on the tmux backend.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
 Installed-wrapper checks:
@@ -381,3 +382,54 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Qwen Code crewmate adapter
+
+Qwen Code 0.21.5 was verified as a crewmate and scout runtime on 2026-08-04, on macOS, tmux backend, through real `fm-spawn.sh` launches into isolated treehouse worktrees.
+It was NOT verified as a primary firstmate harness, and no non-tmux backend was exercised.
+
+Installed identity:
+
+```sh
+qwen --version
+```
+
+```text
+0.21.5
+```
+
+Launch surface.
+`qwen --help` lists `-m, --model`, `--fallback-model`, `-p, --prompt`, `-i, --prompt-interactive`, `-c, --continue`, and `-r, --resume`.
+It does NOT list `--yolo` or `--approval-mode`, yet both are real accepted options with `--approval-mode` choices `plan`, `default`, `auto-edit`, `auto`, `yolo`.
+A `--help` absence is therefore not evidence that an autonomy flag is missing.
+`QWEN_APPROVAL_MODE` does not exist in this version.
+The only `--effort` option in the binary belongs to the `qwen review` subcommand, so the interactive launch carries no reasoning-effort flag.
+
+Entitlement is per model, not per provider.
+Against the same configured provider block, `deepseek-v4-pro` and `qwen3.7-plus` answered a probe, while `deepseek-v4-flash` returned `403 Access to model denied` and `qwen2.6-flash` returned `404 Model not exist`.
+Confirm each model id with `qwen -m <id> -p <probe>` before dispatching on it.
+
+Autonomy.
+`--yolo` ran a crewmate that read files, wrote files, and executed shell commands with no permission gate; the pane footer read `YOLO mode`.
+The approval mode is silently downgraded to `default` when the folder is untrusted, which cannot occur while `security.folderTrust.enabled` is unset because that default makes every folder trusted.
+
+Turn-end hook.
+A `Stop` hook delivered a JSON payload on stdin carrying `hook_event_name`, `session_id`, `cwd`, `stop_hook_active`, and `last_assistant_message`, with `QWEN_PROJECT_DIR` set to the workspace root in the hook environment.
+An extension-provided hook fired without any trust grant and without editing the credential-bearing user settings file.
+A turn that ended in an API error produced no `Stop` event.
+
+Startup prompt.
+Every interactive launch raised a blocking `Built-in Provider Update` prompt whose two persistent answers write to `~/.qwen/settings.json`.
+A workspace-scoped `{"providerMetadata": null}` in `<worktree>/.qwen/settings.json` suppressed the prompt entirely; a subsequent spawn went straight to work and `~/.qwen/settings.json` was byte-unchanged.
+The shipped adapter carries the same payload in the SYSTEM layer instead, via `QWEN_CODE_SYSTEM_SETTINGS_PATH` pointing outside the worktree, so nothing firstmate writes is ever visible to the crewmate's git.
+Read from the installed 0.21.5 bundle rather than observed live: `getSystemSettingsPath()` honours that variable, and `mergeSettings(system, systemDefaults, user, workspace, isTrusted)` applies the system layer last and outside the `isTrusted` gate, so it outranks both the user and workspace layers and survives an untrusted folder.
+
+Supervision surface.
+The mid-turn footer was `.. <rotating tip> (<elapsed> · <arrow> <n> tokens · esc to cancel)` and the idle footer was `Enter to steer · Ctrl+Q to queue · YOLO mode (shift + tab to cycle)`.
+`Escape` cancelled a running turn, printing `Request cancelled.` and RESTORING the cancelled prompt into the composer as real text, which `Ctrl+U` cleared.
+`/quit` exited to the shell without printing a resume hint, and `qwen -c` restored the prior session's turns.
+The empty-composer placeholder `*   Type your message or @path/to/file` was captured with no ANSI styling at all, so it required a registered idle-placeholder pattern rather than ghost stripping.
+
+End-to-end.
+A `--harness qwen --model deepseek-v4-pro` scout spawn received its brief, worked unattended, touched `state/<id>.turn-ended`, was peekable, was steerable through `fm-send` with an exit status of 0, and tore down leaving no worktree pointer, registry token, or state token behind, while its report survived.
+That run predated the move of the settings file out of the worktree; the shipped adapter writes none there, and the per-task settings file is removed with `tasktmp` instead.

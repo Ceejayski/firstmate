@@ -103,10 +103,14 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # Busy signatures are selected by recorded harness unless FM_BUSY_REGEX globally
 # overrides them.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
-# grok: "Ctrl+c:cancel". Claude's current spinner signature is matched only for
+# grok: "Ctrl+c:cancel"; qwen: "esc to cancel". Claude's current spinner signature is matched only for
 # a recorded Claude task because an ellipsis followed by elapsed time is not a
 # safe shared signature for arbitrary harness output. Kimi's moon-plus-middot
-# spinner signature is likewise matched only for a recorded Kimi task.
+# spinner signature is likewise matched only for a recorded Kimi task. qwen's
+# "esc to cancel" is likewise matched only for a recorded qwen task: it appears
+# verbatim in this repo's own tracked files, so a crewmate on another harness
+# rendering one of them must not read as busy (bin/fm-tmux-lib.sh carries the
+# full rationale beside the shared default this mirrors).
 BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather

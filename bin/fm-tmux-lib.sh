@@ -61,7 +61,8 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel";
+# qwen: "esc to cancel".
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -76,6 +77,22 @@
 # busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
+# qwen's `esc to cancel` is deliberately NOT in this shared default; it lives only
+# in the qwen entry below. This default is what the submit core's
+# busy-queued-Enter fallback reads when no harness is recorded, and it is
+# consulted for claude, codex, opencode and pi panes too. That phrase appears
+# verbatim in this repo's own tracked files (this file, the harness-adapters
+# skill, the runtime-backends verification doc), so a crewmate on ANY harness that
+# renders one of them would read as busy; the fallback would then treat a
+# genuinely swallowed Enter as delivered and fm-send would exit 0 on a steer that
+# never landed - a false SUCCESS. Putting one harness's private token here also
+# changes busy detection for every existing adapter, which the qwen adapter
+# addition must not do.
+# FOLLOW-UP (deferred, wider than an adapter addition): the better fix is to make
+# that fallback harness-AWARE. fm-send now declares the recorded harness through
+# FM_SEND_HARNESS, so fm_tmux_submit_enter_core could pass it to fm_pane_is_busy
+# instead of consulting this shared default at all, which would also narrow the
+# same pre-existing exposure carried by `Ctrl+c:cancel` and `esc (to )?interrupt`.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
@@ -83,6 +100,30 @@ FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+# qwen's mid-turn footer is `<spinner> <tip text> (<elapsed> · <arrow> <n> tokens
+# · esc to cancel)`, and the parenthesized run - including `esc to cancel` - is
+# absent from every idle capture. The idle footer reads
+# `Enter to steer · Ctrl+Q to queue · YOLO mode (shift + tab to cycle)`, and the
+# rotating tip text is not a busy signal on its own.
+FM_TMUX_QWEN_BUSY_REGEX_DEFAULT='esc to cancel'
+# qwen renders its empty-composer placeholder as ORDINARY text: no dim/faint SGR
+# and no dark truecolor, so neither ghost stripper can drop it and a genuinely
+# idle composer would otherwise read as pending input forever. It is matched as a
+# whole-row idle placeholder instead, allowing only qwen's leading `*` prompt
+# glyph and whitespace, so any real typed text still reads as pending.
+FM_TMUX_QWEN_IDLE_RE_DEFAULT='^[*›❯[:space:]]*type your message( or @path/to/file)?$'
+
+# fm_tmux_idle_re_for_harness: the verified empty-composer placeholder regex for
+# a recorded harness, or nothing when that harness has none. Only harnesses whose
+# placeholder carries no ghost styling need one; every other adapter is already
+# covered by fm_composer_strip_ghost and deliberately gets an empty answer here,
+# so this resolver cannot widen what any existing adapter treats as empty.
+# Callers that know the harness feed the result to FM_COMPOSER_IDLE_RE.
+fm_tmux_idle_re_for_harness() {  # <harness>
+  case "${1:-}" in
+    qwen) printf '%s' "$FM_TMUX_QWEN_IDLE_RE_DEFAULT" ;;
+  esac
+}
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -97,6 +138,7 @@ fm_busy_lines_match() {  # [harness]
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
+      qwen) regex=$FM_TMUX_QWEN_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.

@@ -79,12 +79,18 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
+- Qwen Code 0.21.5 exposes a `Stop` event whose hook command may come from user settings, workspace settings, or an active extension.
+- Its user settings file also holds provider credentials and its workspace hooks are discarded when the folder is untrusted, so Firstmate uses the extension route: one firstmate-owned extension under `${QWEN_HOME:-$HOME/.qwen}/extensions/firstmate-turn-end/` with a silent always-zero hook.
+- That hook remains inert unless `$QWEN_PROJECT_DIR` contains a per-task token pointer that resolves through Firstmate's private registry to one `state/<id>.turn-ended` marker.
+- qwen has no primary-session guard integration and remains outside the primary integrations above.
+- A qwen turn that ends in an API error emits no `Stop` event, so those turns produce no wake and fall back to idle detection.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, and Grok resume permission and recursion safety.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
+`tests/fm-qwen-harness.test.sh` covers the qwen crew extension's token guard, spawn registration, startup-prompt suppression, captain-settings immutability, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
 [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.

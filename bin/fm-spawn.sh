@@ -59,7 +59,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|qwen)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -102,11 +102,20 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __QWENSETTINGS__ absolute path to this task's qwen system-settings file, written
+#                  under the per-task temp root (tasktmp=) and therefore OUTSIDE the worktree
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# qwen uses a firstmate-owned Qwen extension under ${QWEN_HOME:-$HOME/.qwen}/extensions,
+# a private token registry beside it, plus a gitignored .fm-qwen-turnend worktree
+# pointer and a state token - that pointer is the ONLY per-worktree file a qwen
+# spawn writes. The settings file that suppresses Qwen's blocking
+# built-in-provider-update prompt lives OUTSIDE the worktree, under the per-task
+# temp root, and is reached through QWEN_CODE_SYSTEM_SETTINGS_PATH on the launch
+# command, with a bounded launch-time dismissal gate as the backstop.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -383,13 +392,51 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+
+# Per-task temp root: /tmp/fm-<id>/, claimed HERE - as early as the task id is
+# known and before any resource is taken. /tmp is world-writable and sticky and
+# this path is fully predictable from the task id, so the mkdir is the atomic claim
+# on it; validating early and creating later would leave a window to lose the race.
+# Claiming it before the backend window and the treehouse worktree lease also means
+# a refusal orphans neither, and writes no state/<id>.status - fm-teardown refuses
+# to run without a meta, so a status file written this early could not be cleaned up
+# by any normal path. Hence a plain stderr message here, not spawn_fail: there is no
+# window to name and no meta to reconcile yet.
+#
+# The root holds more than Go build scratch now: the qwen adapter puts qwen's
+# HIGHEST-precedence configuration layer (its system settings) here, so whoever can
+# create or replace entries in this directory controls a --yolo crewmate's config -
+# it could add hooks or mcpServers that qwen executes. OWNERSHIP is the real gate,
+# and a bare `mkdir -p` silently accepts a pre-created foreign-owned directory.
+# Mode is repaired rather than demanded: creating or replacing an entry needs a
+# group/other WRITE bit, which an owner-owned 0755 directory does not grant, and the
+# settings file is 0600 so directory readability leaks nothing. Refusing a
+# pre-existing owner-owned 0755 root would buy no security and would break the first
+# respawn of every task created before this block existed (dead-pane recovery,
+# /updatefirstmate, restart) on every harness, since the old bare `mkdir -p` left
+# 0755 roots that only teardown removes. So chmod it and carry on: self-healing.
+TASK_TMP="/tmp/fm-$ID"
+task_tmp_refuse() {  # <detail>
+  echo "error: per-task temp root $TASK_TMP $1; refusing to spawn rather than trust a directory firstmate does not own. Remove or fix it, then respawn" >&2
+  exit 1
+}
+if [ -L "$TASK_TMP" ]; then
+  task_tmp_refuse "is a symlink"
+elif [ -e "$TASK_TMP" ]; then
+  [ -d "$TASK_TMP" ] || task_tmp_refuse "exists and is not a directory"
+  [ -O "$TASK_TMP" ] || task_tmp_refuse "is owned by another user"
+  chmod 700 "$TASK_TMP" || task_tmp_refuse "could not be restricted to owner-only 700"
+else
+  ( umask 077 && mkdir "$TASK_TMP" ) || task_tmp_refuse "could not be created"
+fi
+
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|qwen)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -455,6 +502,31 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # qwen (Qwen Code): -i runs the prompt and STAYS interactive, which is the
+    # supervised-crewmate shape (-p is one-shot and exits). --yolo auto-approves
+    # every tool call (verified: the crewmate reads, writes, and runs shell
+    # commands with no permission gate, and the footer reads "YOLO mode"); it is
+    # absent from `qwen --help` but is a real, non-hidden yargs option.
+    # QWEN_CODE_SUPPRESS_YOLO_WARNING silences the sandbox-less stderr warning
+    # that would otherwise be the pane's first line.
+    # QWEN_CODE_SYSTEM_SETTINGS_PATH points qwen's SYSTEM settings layer at a
+    # firstmate-owned file under the per-task temp root, which is what suppresses
+    # the blocking built-in-provider-update prompt. It rides the launch command
+    # rather than a separate exported env var so it is part of the one literal the
+    # backend sends to the pane, and therefore cannot be lost by a backend that
+    # starts the agent without inheriting a prior shell's environment.
+    # Verified in qwen 0.21.5: mergeSettings merges systemDefaults, user,
+    # workspace, system in that order, so the system layer wins over the captain's
+    # user settings, and unlike the workspace layer it is NOT gated on folder
+    # trust. Layers merge per key, so a file holding only providerMetadata changes
+    # only that key.
+    # --fallback-model exists and would auto-retry a capacity error on another
+    # model, but it is deliberately NOT passed: firstmate dispatches one concrete
+    # profile, and a silent model swap would make the recorded model wrong.
+    # qwen's turn-end signal does NOT ride the launch command - it is a Stop hook
+    # installed below (firstmate-owned extension + per-task pointer), so the
+    # template is identical for ship/scout/secondmate.
+    qwen) printf '%s' 'QWEN_CODE_SYSTEM_SETTINGS_PATH=__QWENSETTINGS__ QWEN_CODE_SUPPRESS_YOLO_WARNING=1 qwen --yolo __MODELFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -578,7 +650,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|qwen)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -621,7 +693,9 @@ effort_flag_for_harness() {
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
+    # task metadata but never reaches the launch command. qwen is the same: its
+    # only --effort option belongs to the `qwen review` subcommand, not to the
+    # interactive launch, so the axis is recorded and omitted.
   esac
 }
 
@@ -1191,6 +1265,86 @@ kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
+# BACKSTOP for qwen's blocking "Built-in Provider Update" prompt. The primary
+# defense is the per-task system-settings file named on the launch command, which
+# stops the prompt from ever being raised. Because that layer outranks the user
+# one, is never gated on folder trust, and names no project-owned path, it reaches
+# every launch this script builds - so this gate now covers only what the launch
+# template cannot: an unverified raw launch command that carries no
+# QWEN_CODE_SYSTEM_SETTINGS_PATH, and any qwen release that stops honoring it.
+# Escape answers "Remind me later", which writes nothing and lets the brief run.
+# The Escape is strictly gated on seeing the prompt's own title, because a blind
+# Escape on an already-working pane would cancel the crewmate's first turn. That
+# title is localized, so this is a backstop and never the primary defense.
+# Absence of the prompt is the normal, expected case and is never an error.
+# The gate watches the WHOLE bounded window rather than standing down the moment
+# the composer renders: qwen can raise this modal after the TUI has mounted, and
+# a backstop that disarms on that race is no backstop at all - the crewmate would
+# sit behind a blocking dialog forever in a pane that reads healthy. The cost of
+# that choice lands on EVERY qwen spawn, not only the fallback cases: every spawn
+# waits out the full window (FM_QWEN_STARTUP_POLLS x FM_QWEN_POLL_INTERVAL, 20s by
+# default) before the brief is sent. Nothing returns early, INCLUDING a launch
+# whose modal was already cleared: the recorded title is per-provider
+# (Built-in Provider Update - <provider>), so a captain with several configured
+# providers can be shown a second modal after the first is dismissed, and standing
+# down on the intervening clean poll would wedge the crewmate behind that second
+# dialog in a pane that reads healthy - the exact failure this gate exists to
+# prevent. The primary defense - the per-task system-settings file named on the
+# launch command, which stops the prompt from being raised - is unchanged and pays
+# no dialog cost.
+# Three outcomes, decided on captured evidence rather than on whether an Escape
+# was ever sent: the prompt was never raised (0, the normal case), the prompt was
+# raised and is verifiably gone (0), or a final capture taken after the window and
+# the Escape budget are spent STILL shows the modal (1). That last case means the
+# pane is wedged behind a modal and the brief cannot be delivered, so it is a
+# spawn failure, not a warning - the caller must not report success for it. The
+# final capture is what decides, so a prompt cleared on the very last poll still
+# passes.
+#
+# The detector reads PANE CONTENT, which makes this hazard self-referential:
+# documenting the dialog put its exact phrase into tracked files of THIS repo,
+# including the harness-adapters skill AGENTS.md section 4 requires agents to load
+# before spawn and recovery work. A qwen crewmate working the firstmate repo
+# starts its brief while this gate is still polling, so rendering one of those
+# files would match a bare-title test, fire Escapes into a live first turn
+# (cancelling real work), and then hard-fail the spawn of a healthy agent.
+# So match the modal's STRUCTURE, never its prose: the title must co-occur with at
+# least one of its recorded numbered answers drawn as its OWN line, the way the
+# modal renders them and the way a file quoting them in a sentence does not.
+# Do not widen this back to the title alone, and do not quote the modal's answers
+# as standalone lines into files agents load.
+qwen_capture_has_startup_modal() {  # <plain-pane-capture>
+  printf '%s\n' "$1" | grep -Fq 'Built-in Provider Update' || return 1
+  printf '%s\n' "$1" \
+    | grep -Eq '^[[:space:]]*(│|┃)?[[:space:]]*(1\.[[:space:]]+Update all|2\.[[:space:]]+Skip this version|3\.[[:space:]]+Remind me later)([[:space:]]|$)'
+}
+
+qwen_dismiss_startup_prompt() {
+  local pane i=0 max=${FM_QWEN_STARTUP_POLLS:-40} interval=${FM_QWEN_POLL_INTERVAL:-0.5}
+  local escapes=0 max_escapes=${FM_QWEN_STARTUP_ESCAPES:-3} seen=0
+  while [ "$i" -lt "$max" ]; do
+    pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
+    if qwen_capture_has_startup_modal "$pane"; then
+      # Still up: Escape it, bounded, and keep watching until it is verifiably gone.
+      seen=1
+      if [ "$escapes" -lt "$max_escapes" ]; then
+        spawn_send_key "$T" Escape
+        escapes=$((escapes + 1))
+      fi
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  # Never seen at all: nothing to clear, and nothing to re-confirm.
+  [ "$seen" -eq 1 ] || return 0
+  # Seen and still up on the last poll. Give the final Escape one settle interval,
+  # then let a fresh capture - not the loop's last one - deliver the verdict.
+  sleep "$interval"
+  pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
+  qwen_capture_has_startup_modal "$pane" || return 0
+  return 1
+}
+
 kimi_capture_has_empty_composer() {  # <plain-pane-capture>
   printf '%s\n' "$1" \
     | grep -Eq '^[[:space:]]*(│|┃|\|)[[:space:]]*>[[:space:]]*(│|┃|\|)[[:space:]]*$'
@@ -1233,7 +1387,10 @@ kimi_wait_for_delivery() {
   return 1
 }
 
-kimi_spawn_fail() {  # <detail>
+# One contract for every adapter's launch-gate failures: record the failure on the
+# task's own status file so a supervisor reading state sees it, and name the pane
+# to inspect on stderr. Callers keep their own per-harness comment.
+spawn_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
 }
@@ -1288,12 +1445,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
+# Go's build temp nests at gotmp/ inside the per-task root claimed and validated
+# near the top of this script. Go won't create GOTMPDIR, so mkdir before it is used;
+# fm-teardown removes the whole root. Nested (not a bare /tmp/fm-<id>/gotmp) so
+# other per-task temp can live alongside later, and teardown cleans one
+# deterministic path. GOTMPDIR (not TMPDIR) is the targeted knob: TMPDIR is too
+# broad (affects every program's temp, not just Go's).
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches
@@ -1412,6 +1569,64 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
       ;;
+    qwen*)
+      # qwen fires a Stop hook at every turn boundary (verified, qwen 0.21.5),
+      # the same clean equivalent of codex's notify= and pi's turn_end.
+      # qwen loads hooks from three places: the user settings file, the workspace
+      # settings file, and any active extension. The user settings file is
+      # $HOME/.qwen/settings.json - the same file that holds the captain's
+      # provider credentials - so firstmate never edits it. Workspace hooks are
+      # filtered out unless the folder is trusted, and folder trust is a captain
+      # setting firstmate must not depend on. An EXTENSION's hooks are loaded
+      # from the extension's own directory, are enabled by default in every
+      # workspace, and need no credential file edit and no trust grant. So the
+      # turn-end hook lives OUTSIDE the worktree as a single firstmate-owned
+      # extension that is a guarded no-op for every non-firstmate qwen session:
+      # it fires only when the current workspace holds a .fm-qwen-turnend token
+      # pointer that matches the firstmate-owned registry. firstmate then drops
+      # that per-task pointer (gitignored, like the other harnesses' worktree
+      # hook files).
+      QWEN_DIR_HOME="${QWEN_HOME:-$HOME/.qwen}"
+      QWEN_EXT_DIR="$QWEN_DIR_HOME/extensions/firstmate-turn-end"
+      QWEN_AUTH_DIR="$QWEN_DIR_HOME/fm-turn-end.d"
+      mkdir -p "$QWEN_EXT_DIR" "$QWEN_AUTH_DIR"
+      chmod 700 "$QWEN_AUTH_DIR"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$QWEN_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.qwen-turnend-token"
+      sq_qwen_auth_dir=$(shell_quote "$QWEN_AUTH_DIR")
+      cat > "$QWEN_EXT_DIR/fm-turn-end.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+auth_dir=$sq_qwen_auth_dir
+workspace=\${QWEN_PROJECT_DIR:-\$PWD}
+[ -n "\$workspace" ] || exit 0
+p="\$workspace/.fm-qwen-turnend"
+[ -f "\$p" ] || exit 0
+first=
+IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || exit 0
+case "\$first" in token=*) token=\${first#token=} ;; *) exit 0 ;; esac
+case "\$token" in fm.????????????) : ;; *) exit 0 ;; esac
+case "\$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
+t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || exit 0
+case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
+touch "\$t" 2>/dev/null || true
+exit 0
+EOF
+      chmod +x "$QWEN_EXT_DIR/fm-turn-end.sh"
+      hook_command=$(json_escape "bash $(shell_quote "$QWEN_EXT_DIR/fm-turn-end.sh")")
+      printf '{"name":"firstmate-turn-end","version":"1.0.0","hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' \
+        "$hook_command" > "$QWEN_EXT_DIR/qwen-extension.json"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-qwen-turnend"
+      exclude_path '.fm-qwen-turnend'
+      # The provider-update prompt is suppressed through qwen's SYSTEM settings
+      # layer, written under the per-task temp root beside the launch command
+      # below. Nothing about that suppression belongs in the worktree, so this
+      # pointer stays the only per-worktree file a qwen spawn writes.
+      ;;
   esac
 fi
 
@@ -1490,6 +1705,49 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+# qwen's provider-update suppression: a firstmate-owned system-settings file under
+# the per-task temp root, never inside the worktree.
+# Two failure modes this placement avoids, both of which a worktree-resident file
+# has. A clone-COMMON .git/info/exclude entry to hide it would apply to every
+# worktree of the captain's clone, outlive the task, and silently drop a later
+# crewmate's own legitimate .qwen/settings.json work. Left visible instead, an
+# ordinary `git add -A` stages it and firstmate's scratch settings land on the
+# crewmate's deliverable branch and in the PR. Outside the worktree, neither is
+# reachable, and the file is cleaned up with the rest of tasktmp by fm-teardown.
+# Unconditional: it names no project-owned path, so there is nothing to refuse to
+# overwrite, and it covers every kind - including a secondmate, which installs no
+# per-task hook material.
+# This is qwen's HIGHEST-precedence settings layer, so the target is verified before
+# it is written even though the temp root above is already owner-only 700: a
+# symlink here would redirect the write, and the obvious target is the captain's
+# credential-bearing $HOME/.qwen/settings.json - the one file this whole design
+# exists never to touch. Same explicit guard the removed worktree write carried.
+# 0600, matching how this script already writes the turn-end registry tokens. The
+# crewmate's own qwen process must keep write access (0.21.5 rewrites the file in
+# place to stamp its "$version"), and it runs as this user, so owner-only is enough.
+case "$LAUNCH" in
+  *__QWENSETTINGS__*)
+    QWEN_SYSTEM_SETTINGS="$TASK_TMP/qwen-system-settings.json"
+    if [ -L "$QWEN_SYSTEM_SETTINGS" ]; then
+      spawn_fail "qwen system-settings path $QWEN_SYSTEM_SETTINGS is a symlink; refusing to follow it and hand qwen a config file firstmate does not control"
+      exit 1
+    fi
+    if [ -e "$QWEN_SYSTEM_SETTINGS" ] && [ ! -f "$QWEN_SYSTEM_SETTINGS" ]; then
+      spawn_fail "qwen system-settings path $QWEN_SYSTEM_SETTINGS exists and is not a regular file; refusing to write qwen's highest-precedence config through it"
+      exit 1
+    fi
+    old_umask=$(umask)
+    umask 077
+    if ! printf '%s\n' '{"providerMetadata": null}' > "$QWEN_SYSTEM_SETTINGS"; then
+      umask "$old_umask"
+      spawn_fail "qwen system-settings file $QWEN_SYSTEM_SETTINGS could not be written; refusing to launch without the provider-update suppression firstmate controls"
+      exit 1
+    fi
+    umask "$old_umask"
+    chmod 600 "$QWEN_SYSTEM_SETTINGS" 2>/dev/null || true
+    LAUNCH=${LAUNCH//__QWENSETTINGS__/$(shell_quote "$QWEN_SYSTEM_SETTINGS")}
+    ;;
+esac
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
@@ -1506,9 +1764,15 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = qwen ]; then
+  if ! qwen_dismiss_startup_prompt; then
+    spawn_fail "qwen is still showing its blocking built-in-provider-update dialog after ${FM_QWEN_STARTUP_ESCAPES:-3} Escapes; the brief was never delivered"
+    exit 1
+  fi
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
@@ -1518,15 +1782,15 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
     "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_fail "kimi brief pointer could not be submitted"
     exit 1
   }
   if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_fail "kimi brief pointer could not be submitted"
     exit 1
   fi
   if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    spawn_fail "kimi brief pointer delivery was not confirmed"
     exit 1
   fi
 fi

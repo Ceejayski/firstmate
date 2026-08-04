@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and qwen.
 user-invocable: false
 metadata:
   internal: true
@@ -34,7 +34,7 @@ The supervision knowledge lives here: busy signature, exit command, interrupt, d
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any empty-composer placeholder the harness renders without ghost styling (registered as a per-harness idle regex resolved by `fm_tmux_idle_re_for_harness` in `bin/fm-tmux-lib.sh`, while `FM_COMPOSER_IDLE_RE` stays the operator's own override) plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
 
 ## Detection
 
@@ -55,7 +55,7 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, and `grok` have empirically validated hook paths for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, `pi-signed`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
-Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
+Kimi and qwen are outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns their separate guarded crew-wake hooks.
 The exact hook files, commands, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
@@ -125,6 +125,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| qwen | `--model <model>` | none | Verified 2026-08-04 on Qwen Code 0.21.5. `qwen --help` shows `-m, --model`, and the long `--model` form was confirmed live. The only `--effort` option in the binary belongs to the `qwen review` subcommand, not to the interactive launch, so the requested effort is recorded in meta and omitted from the launch. |
 
 ### Model support discovery
 
@@ -139,6 +140,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| qwen | Read the `modelProviders` entries in `~/.qwen/settings.json` for the ids this installation is configured for, then confirm each one is actually reachable with `qwen -m <id> -p <probe>`. Configured is NOT the same as entitled: on 2026-08-04 `deepseek-v4-pro` and `qwen3.7-plus` answered, `deepseek-v4-flash` returned `403 Access to model denied`, and `qwen2.6-flash` returned `404 Model not exist`, all from the same configured provider block. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.
@@ -157,6 +159,7 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- qwen: `/<skill>`, for example `/no-mistakes`. Typing `/` opens a command popup (the pane's own tip says so), so the same too-fast-Enter hazard as claude/codex/grok applies; `fm-send`'s retried Enter covers it.
 
 ## Submission acknowledgement hazards
 
@@ -391,3 +394,82 @@ The spinner match covers the full moon-phase glyph set rather than one frame, bu
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal supplements the pane busy signature, whose locale- and emoji-font-sensitive limits still apply while a turn is running.
+
+## qwen (VERIFIED 2026-08-04, Qwen Code 0.21.5)
+
+Qwen Code (`qwen`), an open-source terminal coding agent, reached through whatever providers the captain has configured in `~/.qwen/settings.json`.
+On this fleet that is Alibaba ModelStudio, which puts DeepSeek and Qwen frontier models behind one CLI and makes qwen a fourth independent provider for quota overflow.
+Launch with `-i` and a positional-free interactive prompt: `QWEN_CODE_SUPPRESS_YOLO_WARNING=1 qwen --yolo --model <model> -i "<brief>"`.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `esc to cancel`, the mid-turn cancel hint inside qwen's spinner footer (`.. <rotating tip> (34s · ↑ 909 tokens · esc to cancel)`). The parenthesized run is absent when idle; the idle footer reads `Enter to steer · Ctrl+Q to queue · YOLO mode (shift + tab to cycle)`. The rotating tip text is never a busy signal on its own. |
+| Exit command | `/quit` (and `/exit`) typed into the composer exits cleanly back to the shell. No resume hint is printed on exit, unlike grok. |
+| Interrupt | Single `Escape`, which prints `Request cancelled.`. |
+| Resume | `qwen -c` / `--continue` resumes the most recent session for the current directory (verified: prior turns were restored); `qwen -r <session-id>` / `--resume` targets one session, and bare `--resume` opens a picker. |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`. |
+| Autonomy | `--yolo` (equivalently `--approval-mode yolo`); the footer then reads `YOLO mode`. Verified to read, write, and run shell commands with no permission gate. `--yolo` and `--approval-mode` are BOTH absent from `qwen --help` yet are real, accepted options - do not conclude from `--help` that autonomy is unavailable. `QWEN_APPROVAL_MODE` does NOT exist in 0.21.5. |
+| Environment marker | None consulted; detection is by process ancestry on the command name `qwen`, or the script path when the interpreter is bare `node`. |
+| Composer | An unbordered row between two horizontal rules, with a `*` prompt glyph. See the unstyled-placeholder quirk below. |
+| Effort | No reasoning-effort flag on the interactive launch, so requested effort is recorded in task metadata and omitted. |
+
+**Startup dialog: a BLOCKING built-in-provider-update prompt (this is the adapter's main hazard).**
+On every interactive launch where the bundled provider catalog differs from the version recorded in settings, qwen raises a modal `Built-in Provider Update · <provider>` prompt offering `1. Update all`, `2. Skip this version`, `3. Remind me later (esc)`.
+It blocks the queued `-i` brief, so an unattended crewmate sits on it forever while the pane looks healthy - the exact failure mode that makes an adapter look verified and silently wedge every real task.
+It is NOT a one-time first-run dialog: `Remind me later` is the only answer that writes nothing, so the prompt returns on the next launch.
+Both persistent answers write to `~/.qwen/settings.json`, which is the same file that holds the captain's provider credentials, so firstmate takes neither.
+`fm-spawn` instead neutralizes the check for this task only, by writing `{"providerMetadata": null}` to a firstmate-owned file under the per-task temp root (`tasktmp=`, i.e. `/tmp/fm-<id>/qwen-system-settings.json`) and pointing qwen's SYSTEM settings layer at it with `QWEN_CODE_SYSTEM_SETTINGS_PATH=<path>` on the launch command itself.
+Verified in the qwen 0.21.5 bundle: `getSystemSettingsPath()` honours that variable, and `mergeSettings` merges `systemDefaults, user, workspace, system` in that order, so the system layer wins over the captain's user settings; layers merge per key, so a file holding only `providerMetadata` changes only that key.
+The update check skips every provider whose merged metadata carries no version, so a null namespace disables the prompt without naming any provider, without changing which models exist (those come from `modelProviders`), and without touching a captain-owned file.
+Verified live: with that suppression in place a fresh spawn went straight to work, and `~/.qwen/settings.json` was byte-unchanged.
+
+**EDITOR WARNING: that settings file lives OUTSIDE the worktree on purpose. Do not "simplify" it back to a `<worktree>/.qwen/settings.json`.** A worktree-resident file has two failure modes, and there is no placement inside the worktree that avoids both:
+- Hidden with a git exclude, it needs an entry in `.git/info/exclude`, which is clone-COMMON and is never cleaned up. That permanently hides `.qwen/settings.json` - a conventional project config path - from `git status` and `git add -A` in *every* worktree of the captain's clone, so a later crewmate tasked with authoring qwen workspace settings has its legitimate work silently dropped from the commit.
+- Left visible instead, an ordinary `git add -A` (the normal way a crewmate stages its work) puts firstmate's `{"providerMetadata": null}` scratch file on the deliverable branch and into the PR to the captain's project.
+
+Outside the worktree, neither is reachable: git never sees it, and `fm-teardown` removes it with the rest of `tasktmp`.
+It also removes the two conditions the in-worktree version could not cover - it names no project-owned path, so there is nothing to refuse to overwrite, and the system layer (unlike the workspace layer) is not gated on folder trust.
+Every launch `fm-spawn` builds from the qwen template carries `QWEN_CODE_SYSTEM_SETTINGS_PATH`, secondmate launches included, so the only case left falling through to `fm-spawn`'s bounded launch-time backstop is a raw launch command of any kind (the unverified-adapter escape hatch), which carries no such variable.
+That backstop sends `Escape` only after seeing the prompt's own title.
+That title is localized, so treat the keystroke as the backstop and the settings file as the real fix.
+The backstop watches the whole bounded window (`FM_QWEN_STARTUP_POLLS` x `FM_QWEN_POLL_INTERVAL`, 20s by default) rather than standing down once the composer renders, because qwen can raise the modal after the TUI has mounted; it re-checks that the title is gone after each `Escape` and gives up after `FM_QWEN_STARTUP_ESCAPES` (3) attempts.
+The cost of that lands on EVERY qwen spawn: nothing returns early, not even a launch whose modal was already cleared, because the title is per-provider (`Built-in Provider Update · <provider>`) and a captain with several configured providers can be shown a second modal after the first is dismissed - standing down on the intervening clean poll would wedge the crewmate behind that one.
+EDITOR WARNING: that backstop matches PANE CONTENT, so it can match this very section. It requires the title to co-occur with one of the numbered answers drawn as its own line; broadening it back to the bare title, or quoting those answers as standalone lines into files agents load before spawn work, makes a qwen crewmate reading the firstmate repo cancel its own first turn and then hard-fail its spawn while perfectly healthy.
+A prompt still on screen in a final capture taken after the window and the `Escape` budget are spent FAILS the spawn: `fm-spawn` appends a `failed:` line naming the dialog to `state/<id>.status` and exits non-zero instead of printing `spawned`, because a brief that never reached the agent is not a successful spawn.
+The two legitimate outcomes - no prompt at all, and a prompt that was verifiably cleared - stay silent successes.
+Teardown removes the settings file with the rest of `tasktmp` and never touches any `.qwen/` path inside the worktree, so a project-owned or crewmate-authored `.qwen/settings.json` survives untouched - as does firstmate's dirty check, which grants `.qwen/` no tolerance precisely because firstmate puts nothing there.
+If a qwen pane is ever found parked on this prompt during recovery, `Escape` is the safe answer - never `1` or `2`.
+
+**Folder trust silently downgrades autonomy.**
+`qwen` drops the approval mode to `default` (prompt for every tool call) and discards workspace-scoped settings when the current folder is untrusted, printing `Approval mode overridden to "default" because the current folder is not trusted.`.
+Folder trust is off by default (`security.folderTrust.enabled` defaults to false, which makes every folder trusted), which is why `--yolo` works in a fresh pooled worktree.
+If a captain enables folder trust, qwen crewmates lose autonomy in untrusted worktrees; that is a captain setting firstmate does not edit, so report it rather than working around it.
+
+**UNSTYLED idle placeholder: the composer needs a registered pattern.**
+qwen's empty composer shows `*   Type your message or @path/to/file` as ORDINARY text - no dim/faint SGR and no dark truecolor - so neither half of `fm_composer_strip_ghost` can drop it, and an idle qwen composer reads as `pending` (holding unsubmitted input) forever.
+Observed consequence before the fix: `fm-send` delivered a message the agent visibly answered, then failed with `delivery unconfirmed; verdict=pending`.
+`FM_TMUX_QWEN_IDLE_RE_DEFAULT` in `bin/fm-tmux-lib.sh` registers the whole-row placeholder, `fm_tmux_idle_re_for_harness` resolves it, and `fm-send` declares the recorded harness through `FM_SEND_HARNESS` so the tmux adapter supplies it to submit-verification.
+Only a harness that registers a pattern is affected, so no existing adapter's composer reading changed.
+qwen's `esc to cancel` is registered ONLY as qwen's own busy signature, never in the harness-agnostic `FM_TMUX_BUSY_REGEX_DEFAULT`: that shared default is read for claude/codex/opencode/pi panes too, and the phrase appears verbatim in this repo's own tracked files, so putting it there would make a crewmate on another harness read as busy and let the submit core's fallback report a swallowed Enter as delivered. The known better fix - making that fallback harness-aware through `FM_SEND_HARNESS` - is recorded as a follow-up in `bin/fm-tmux-lib.sh` and was deliberately left out of the adapter addition.
+The herdr/orca/cmux backends were not exercised for qwen; only the tmux path is verified.
+
+**After an interrupt, qwen RESTORES the cancelled prompt into the composer.**
+Cancelling a turn with `Escape` leaves the cancelled message sitting as real, unsubmitted text.
+Clear it with `Ctrl+U` before steering, or the next message concatenates onto it.
+
+**A failed turn does not fire the turn-end hook.**
+A turn that ends in an API error (a wrong model id returning `404 Model not exist`, a model the plan is not entitled to returning `403 Access to model denied`) produces no `Stop` event, so no turn-end marker is touched and only stale-pane detection surfaces it.
+
+Turn-end hook: qwen fires a `Stop` hook at every turn boundary, the clean equivalent of codex's `notify=` and pi's `turn_end`.
+qwen loads hooks from the user settings file, the workspace settings file, and any active extension.
+The user settings file is the credential-bearing `~/.qwen/settings.json`, which firstmate never edits; workspace hooks are discarded unless the folder is trusted.
+An extension's hooks are loaded from the extension's own directory, are enabled by default in every workspace, and need neither a credential-file edit nor a trust grant.
+So `fm-spawn` installs ONE firstmate-owned extension, `${QWEN_HOME:-$HOME/.qwen}/extensions/firstmate-turn-end/` (`qwen-extension.json` plus the companion `fm-turn-end.sh`), guarded as a silent no-op for every non-firstmate qwen session.
+Its `Stop` command fires only when the current workspace holds a `.fm-qwen-turnend` token pointer matching the firstmate-owned registry under `${QWEN_HOME:-$HOME/.qwen}/fm-turn-end.d/`.
+The hook reads `$QWEN_PROJECT_DIR`, which qwen sets for hook processes and which equals the workspace root (the `Stop` payload's `cwd` carries the same value, but the env var needs no `jq`).
+`fm-teardown` removes exactly four things: the worktree turn-end pointer `<worktree>/.fm-qwen-turnend`, the hook registry entry under `${QWEN_HOME:-$HOME/.qwen}/fm-turn-end.d/`, the state token `state/<id>.qwen-turnend-token`, and the per-task system-settings file, which goes with the rest of `tasktmp` OUTSIDE the worktree.
+It removes no `.qwen/` path inside the worktree, and neither should you during manual cleanup: firstmate writes none, so any `<worktree>/.qwen/settings.json` you find is the project's or was authored by the crewmate as part of its task, and deleting it destroys real work.
+A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding it did not fire.
+
+qwen as a PRIMARY firstmate harness is NOT verified: there is no `docs/supervision-protocols/qwen.md`, no primary turn-end guard, and no pre-arm seatbelt for it.
+It is verified as a crewmate and scout runtime only.

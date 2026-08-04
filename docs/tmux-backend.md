@@ -46,7 +46,7 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
-It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
+It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Qwen process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
 The verified Pi Launcher path reports the exact foreground command `pi-launcher` for both pi and pi-signed, while direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly.
@@ -62,6 +62,10 @@ A bare shell prompt is `unknown`, so away-mode escalation is never injected into
 Rendered busy detection is also harness-scoped.
 Task metadata selects only that harness's verified signature, so output from one harness cannot make another harness appear busy.
 The exact selection contract and safety rationale live in [architecture](architecture.md#runtime-session-backends), while the signatures live in [the harness-adapters skill](../.agents/skills/harness-adapters/SKILL.md).
+
+Empty-composer matching is harness-scoped too, but only for a harness that registers an idle placeholder.
+A harness that renders its placeholder without ghost styling would otherwise read as pending input forever, so `fm-send` declares the recorded harness and this backend supplies that harness's registered placeholder to submit-verification.
+Every other adapter keeps the reading it already had, and an operator's own `FM_COMPOSER_IDLE_RE` still wins; the registered placeholders live in [the harness-adapters skill](../.agents/skills/harness-adapters/SKILL.md).
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message once and retries Enter only until the composer clears.
@@ -84,6 +88,7 @@ Ambiguous pending text never receives the busy-queue conversion.
 tests/fm-backend-tmux-smoke.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
+tests/fm-qwen-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-bootstrap.test.sh
 ```

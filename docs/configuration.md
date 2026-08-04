@@ -174,12 +174,12 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 ## Harness support
 
-claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
+claude, codex, opencode, pi, pi-signed, grok, kimi, and qwen are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
-Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
+Kimi and qwen remain outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns their separate crew wake hooks.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
@@ -202,6 +202,10 @@ For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a pe
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
+For qwen crews, `fm-spawn.sh` installs one firstmate-owned Qwen extension under `$QWEN_HOME/extensions/firstmate-turn-end/`, or `~/.qwen/extensions/firstmate-turn-end/` when `QWEN_HOME` is unset, records a matching private registry token beside it, and drops a per-task `.fm-qwen-turnend` pointer in the worktree.
+That pointer is the only per-worktree file a qwen spawn writes.
+The settings file that suppresses Qwen's blocking built-in-provider-update prompt lives OUTSIDE the worktree, under the per-task temp root recorded as `tasktmp=`, and is reached through `QWEN_CODE_SYSTEM_SETTINGS_PATH` on the launch command; no `.qwen/` path inside the worktree is created, read, or removed, so a project-owned or crewmate-authored `.qwen/settings.json` is never touched.
+Firstmate never edits the captain's credential-bearing `~/.qwen/settings.json`; teardown removes the pointer, the registry token, and the state token, and the settings file goes with the rest of `tasktmp`.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
@@ -459,9 +463,13 @@ FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-fleet-s
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1 # seconds fm-fleet-sync.sh waits before each of those retries
 FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30       # min mtime age before fm-fleet-sync.sh treats a leftover packed-refs.lock as provably stale
 FM_BUSY_REGEX=          # optional global override for every harness-scoped busy-pane matcher; unset uses each recorded harness's verified signature
-FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
+FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping; when set it also wins over the recorded harness's registered idle placeholder
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
+QWEN_HOME=              # optional Qwen config home for firstmate's qwen turn-end extension and its private token registry; defaults to ~/.qwen
+FM_QWEN_STARTUP_POLLS=40    # polls of fm-spawn.sh's launch-time backstop for qwen's blocking built-in-provider-update dialog
+FM_QWEN_POLL_INTERVAL=0.5   # seconds between those polls; the two together bound the watch window (20s by default)
+FM_QWEN_STARTUP_ESCAPES=3   # Escapes that backstop sends before the spawn fails with the dialog still on screen
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables

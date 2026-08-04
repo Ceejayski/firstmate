@@ -64,8 +64,10 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    # shellcheck disable=SC2016 # Literal backticks are assertion text, not expansion.
     assert_grep 'Never use `git stash` or any of its subcommands in this worktree.' "$brief" \
       "$id: ship brief missing the shared-stash prohibition"
+    # shellcheck disable=SC2016 # Literal backticks are assertion text, not expansion.
     assert_grep 'Linked worktrees share the clone-wide `refs/stash`' "$brief" \
       "$id: ship brief missing the shared-stash hazard rationale"
     assert_grep 'Use scratch commits or a temporary branch instead.' "$brief" \
@@ -379,8 +381,10 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+  # shellcheck disable=SC2016 # Literal backticks are assertion text, not expansion.
   assert_grep 'Never use `git stash` or any of its subcommands in this worktree.' "$brief" \
     "scout brief missing the shared-stash prohibition"
+  # shellcheck disable=SC2016 # Literal backticks are assertion text, not expansion.
   assert_grep 'Linked worktrees share the clone-wide `refs/stash`' "$brief" \
     "scout brief missing the shared-stash hazard rationale"
   assert_grep 'Use scratch commits or a temporary branch instead.' "$brief" \
