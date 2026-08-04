@@ -17,6 +17,14 @@ assert_source_line() {
   grep -Fqx -- "$line" "$file" || fail "${why:-existing launch template changed}: $line"
 }
 
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
 # The whole point of adding an adapter is that no other adapter moves. Pin every
 # pre-existing launch template byte-for-byte, including Kimi's, which the Qwen
 # work sits directly beside in the same case statement.
@@ -127,6 +135,9 @@ make_spawn_case() {
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  # The per-task temp root is keyed on the task id alone, so a leftover from an
+  # earlier run would decide this run's ownership checks instead of the spawn.
+  rm -rf "/tmp/fm-$id"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$home/.qwen"
   # A stand-in for the captain's real credential-bearing settings file. No test
   # here may change its bytes.
@@ -218,6 +229,11 @@ test_qwen_launch_is_verified() {
   esac
   [ "$(cat "$settings")" = '{"providerMetadata": null}' ] \
     || fail "qwen's system settings file does not carry the provider-update suppression"
+  # /tmp is world-writable, and this file is qwen's highest-precedence config layer.
+  [ "$(file_mode "$settings")" = 600 ] \
+    || fail "qwen's system settings file is not owner-only: $(file_mode "$settings")"
+  [ "$(file_mode "/tmp/fm-$id")" = 700 ] \
+    || fail "the per-task temp root is not owner-only: $(file_mode "/tmp/fm-$id")"
 
   excl=$(git -C "$WT_DIR" rev-parse --git-path info/exclude)
   assert_grep '.fm-qwen-turnend' "$excl" "qwen token pointer was not excluded from the worktree"
@@ -232,6 +248,50 @@ test_qwen_launch_is_verified() {
   [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
     || fail "qwen spawn left the worktree dirty, which would block teardown"
   pass "fm-spawn: qwen launches interactively, unattended, and registers a guarded turn-end token"
+}
+
+# The settings file is qwen's HIGHEST-precedence config layer and it sits at a
+# fully predictable path under a world-writable sticky /tmp, so whoever controls it
+# controls a --yolo crewmate - a planted `hooks` or `mcpServers` entry would be
+# executed. Both refusal paths must fail the spawn rather than trust the path.
+test_qwen_system_settings_refuses_an_untrusted_path() {
+  local id rec out rc sentinel before
+  # (a) A symlink standing in for the settings file redirects firstmate's write.
+  # The obvious target is the captain's own credential-bearing settings file.
+  id=qwen-symlink-q8
+  rec=$(make_spawn_case symlink "$id")
+  read_spawn_record "$rec"
+  sentinel="$CASE_DIR/captain-settings.json"
+  before='{"env":{"SECRET_KEY":"do-not-touch"}}'
+  printf '%s\n' "$before" > "$sentinel"
+  mkdir -p "/tmp/fm-$id"
+  chmod 700 "/tmp/fm-$id"
+  ln -s "$sentinel" "/tmp/fm-$id/qwen-system-settings.json"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a qwen spawn followed a symlinked system-settings path and exited 0"
+  assert_contains "$out" "is a symlink" \
+    "the spawn failure did not name the symlinked system-settings path"
+  [ "$(cat "$sentinel")" = "$before" ] \
+    || fail "firstmate followed the symlink and truncated the file it points at"
+  rm -rf "/tmp/fm-$id"
+
+  # (b) A pre-created, loosely-permissioned temp root is somebody else's directory
+  # to write into, even when this user owns it.
+  id=qwen-tmpmode-q9
+  rec=$(make_spawn_case tmpmode "$id")
+  read_spawn_record "$rec"
+  mkdir -p "/tmp/fm-$id"
+  chmod 777 "/tmp/fm-$id"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a qwen spawn accepted a world-writable per-task temp root and exited 0"
+  assert_contains "$out" "not the required owner-only 700" \
+    "the spawn failure did not name the unsafe temp-root mode"
+  assert_absent "/tmp/fm-$id/qwen-system-settings.json" \
+    "firstmate wrote qwen's system settings into a world-writable directory"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn: qwen's system-settings path is refused unless firstmate provably owns it"
 }
 
 # The captain's provider credentials live in the same file qwen would rewrite if
@@ -628,6 +688,7 @@ SH
 test_existing_launch_templates_are_byte_pinned
 test_qwen_launch_is_verified
 test_qwen_spawn_never_writes_the_captain_settings_file
+test_qwen_system_settings_refuses_an_untrusted_path
 test_qwen_spawn_preserves_a_project_owned_workspace_settings_file
 test_qwen_startup_prompt_is_dismissed_only_when_present
 test_qwen_startup_prompt_is_dismissed_when_it_arrives_late

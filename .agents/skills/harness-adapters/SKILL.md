@@ -429,7 +429,8 @@ Verified live: with that suppression in place a fresh spawn went straight to wor
 
 Outside the worktree, neither is reachable: git never sees it, and `fm-teardown` removes it with the rest of `tasktmp`.
 It also removes the two conditions the in-worktree version could not cover - it names no project-owned path, so there is nothing to refuse to overwrite, and the system layer (unlike the workspace layer) is not gated on folder trust.
-So only a secondmate launch on an unverified raw launch command, which carries no `QWEN_CODE_SYSTEM_SETTINGS_PATH`, still falls through to `fm-spawn`'s bounded launch-time backstop, which sends `Escape` only after seeing the prompt's own title.
+Every launch `fm-spawn` builds from the qwen template carries `QWEN_CODE_SYSTEM_SETTINGS_PATH`, secondmate launches included, so the only case left falling through to `fm-spawn`'s bounded launch-time backstop is a raw launch command of any kind (the unverified-adapter escape hatch), which carries no such variable.
+That backstop sends `Escape` only after seeing the prompt's own title.
 That title is localized, so treat the keystroke as the backstop and the settings file as the real fix.
 The backstop watches the whole bounded window (`FM_QWEN_STARTUP_POLLS` x `FM_QWEN_POLL_INTERVAL`, 20s by default) rather than standing down once the composer renders, because qwen can raise the modal after the TUI has mounted; it re-checks that the title is gone after each `Escape` and gives up after `FM_QWEN_STARTUP_ESCAPES` (3) attempts.
 The cost of that lands on EVERY qwen spawn: nothing returns early, not even a launch whose modal was already cleared, because the title is per-provider (`Built-in Provider Update · <provider>`) and a captain with several configured providers can be shown a second modal after the first is dismissed - standing down on the intervening clean poll would wedge the crewmate behind that one.
@@ -466,7 +467,8 @@ An extension's hooks are loaded from the extension's own directory, are enabled 
 So `fm-spawn` installs ONE firstmate-owned extension, `${QWEN_HOME:-$HOME/.qwen}/extensions/firstmate-turn-end/` (`qwen-extension.json` plus the companion `fm-turn-end.sh`), guarded as a silent no-op for every non-firstmate qwen session.
 Its `Stop` command fires only when the current workspace holds a `.fm-qwen-turnend` token pointer matching the firstmate-owned registry under `${QWEN_HOME:-$HOME/.qwen}/fm-turn-end.d/`.
 The hook reads `$QWEN_PROJECT_DIR`, which qwen sets for hook processes and which equals the workspace root (the `Stop` payload's `cwd` carries the same value, but the env var needs no `jq`).
-`fm-teardown` removes the worktree pointer, the worktree settings file, the registry entry, and the state token.
+`fm-teardown` removes exactly four things: the worktree turn-end pointer `<worktree>/.fm-qwen-turnend`, the hook registry entry under `${QWEN_HOME:-$HOME/.qwen}/fm-turn-end.d/`, the state token `state/<id>.qwen-turnend-token`, and the per-task system-settings file, which goes with the rest of `tasktmp` OUTSIDE the worktree.
+It removes no `.qwen/` path inside the worktree, and neither should you during manual cleanup: firstmate writes none, so any `<worktree>/.qwen/settings.json` you find is the project's or was authored by the crewmate as part of its task, and deleting it destroys real work.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding it did not fire.
 
 qwen as a PRIMARY firstmate harness is NOT verified: there is no `docs/supervision-protocols/qwen.md`, no primary turn-end guard, and no pre-arm seatbelt for it.

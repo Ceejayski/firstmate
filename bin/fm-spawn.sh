@@ -1251,8 +1251,9 @@ kimi_capture() {
 # providers can be shown a second modal after the first is dismissed, and standing
 # down on the intervening clean poll would wedge the crewmate behind that second
 # dialog in a pane that reads healthy - the exact failure this gate exists to
-# prevent. The primary defense - the per-worktree .qwen/settings.json that stops
-# the prompt from being raised - is unchanged and pays no dialog cost.
+# prevent. The primary defense - the per-task system-settings file named on the
+# launch command, which stops the prompt from being raised - is unchanged and pays
+# no dialog cost.
 # Three outcomes, decided on captured evidence rather than on whether an Escape
 # was ever sent: the prompt was never raised (0, the normal case), the prompt was
 # raised and is verifiably gone (0), or a final capture taken after the window and
@@ -1411,7 +1412,31 @@ fi
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+#
+# This root is PRIVATE (0700, owner-only) and its creation FAILS CLOSED, because
+# /tmp is world-writable and sticky and the path is fully predictable from the task
+# id. It no longer holds only Go build scratch: the qwen adapter puts qwen's
+# highest-precedence configuration layer (its system settings) here, so whoever
+# controls this directory controls a --yolo crewmate's config - it could add hooks
+# or mcpServers that qwen executes. A bare `mkdir -p` silently accepts a
+# pre-created foreign-owned directory, so refuse anything that is not a directory
+# this user owns at mode 700, and never follow a symlink standing in for it.
 TASK_TMP="/tmp/fm-$ID"
+task_tmp_refuse() {  # <detail>
+  spawn_fail "per-task temp root $TASK_TMP $1; refusing to spawn rather than trust a directory firstmate does not own. Remove or fix it, then respawn"
+  exit 1
+}
+if [ -L "$TASK_TMP" ]; then
+  task_tmp_refuse "is a symlink"
+elif [ -e "$TASK_TMP" ]; then
+  [ -d "$TASK_TMP" ] || task_tmp_refuse "exists and is not a directory"
+  [ -O "$TASK_TMP" ] || task_tmp_refuse "is owned by another user"
+  TASK_TMP_MODE=$(fm_inherit_file_mode "$TASK_TMP")
+  [ "$TASK_TMP_MODE" = 700 ] \
+    || task_tmp_refuse "has mode ${TASK_TMP_MODE:-unreadable}, not the required owner-only 700"
+else
+  ( umask 077 && mkdir "$TASK_TMP" ) || task_tmp_refuse "could not be created"
+fi
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches
@@ -1678,10 +1703,34 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 # Unconditional: it names no project-owned path, so there is nothing to refuse to
 # overwrite, and it covers every kind - including a secondmate, which installs no
 # per-task hook material.
+# This is qwen's HIGHEST-precedence settings layer, so the target is verified before
+# it is written even though the temp root above is already owner-only 700: a
+# symlink here would redirect the write, and the obvious target is the captain's
+# credential-bearing $HOME/.qwen/settings.json - the one file this whole design
+# exists never to touch. Same explicit guard the removed worktree write carried.
+# 0600, matching how this script already writes the turn-end registry tokens. The
+# crewmate's own qwen process must keep write access (0.21.5 rewrites the file in
+# place to stamp its "$version"), and it runs as this user, so owner-only is enough.
 case "$LAUNCH" in
   *__QWENSETTINGS__*)
     QWEN_SYSTEM_SETTINGS="$TASK_TMP/qwen-system-settings.json"
-    printf '%s\n' '{"providerMetadata": null}' > "$QWEN_SYSTEM_SETTINGS"
+    if [ -L "$QWEN_SYSTEM_SETTINGS" ]; then
+      spawn_fail "qwen system-settings path $QWEN_SYSTEM_SETTINGS is a symlink; refusing to follow it and hand qwen a config file firstmate does not control"
+      exit 1
+    fi
+    if [ -e "$QWEN_SYSTEM_SETTINGS" ] && [ ! -f "$QWEN_SYSTEM_SETTINGS" ]; then
+      spawn_fail "qwen system-settings path $QWEN_SYSTEM_SETTINGS exists and is not a regular file; refusing to write qwen's highest-precedence config through it"
+      exit 1
+    fi
+    old_umask=$(umask)
+    umask 077
+    if ! printf '%s\n' '{"providerMetadata": null}' > "$QWEN_SYSTEM_SETTINGS"; then
+      umask "$old_umask"
+      spawn_fail "qwen system-settings file $QWEN_SYSTEM_SETTINGS could not be written; refusing to launch without the provider-update suppression firstmate controls"
+      exit 1
+    fi
+    umask "$old_umask"
+    chmod 600 "$QWEN_SYSTEM_SETTINGS" 2>/dev/null || true
     LAUNCH=${LAUNCH//__QWENSETTINGS__/$(shell_quote "$QWEN_SYSTEM_SETTINGS")}
     ;;
 esac

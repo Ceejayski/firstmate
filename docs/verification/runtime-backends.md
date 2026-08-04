@@ -431,4 +431,5 @@ The mid-turn footer was `.. <rotating tip> (<elapsed> · <arrow> <n> tokens · e
 The empty-composer placeholder `*   Type your message or @path/to/file` was captured with no ANSI styling at all, so it required a registered idle-placeholder pattern rather than ghost stripping.
 
 End-to-end.
-A `--harness qwen --model deepseek-v4-pro` scout spawn received its brief, worked unattended, touched `state/<id>.turn-ended`, was peekable, was steerable through `fm-send` with an exit status of 0, and tore down leaving no worktree pointer, worktree settings file, registry token, or state token behind, while its report survived.
+A `--harness qwen --model deepseek-v4-pro` scout spawn received its brief, worked unattended, touched `state/<id>.turn-ended`, was peekable, was steerable through `fm-send` with an exit status of 0, and tore down leaving no worktree pointer, registry token, or state token behind, while its report survived.
+That run predated the move of the settings file out of the worktree; the shipped adapter writes none there, and the per-task settings file is removed with `tasktmp` instead.
