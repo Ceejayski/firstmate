@@ -392,6 +392,44 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+
+# Per-task temp root: /tmp/fm-<id>/, claimed HERE - as early as the task id is
+# known and before any resource is taken. /tmp is world-writable and sticky and
+# this path is fully predictable from the task id, so the mkdir is the atomic claim
+# on it; validating early and creating later would leave a window to lose the race.
+# Claiming it before the backend window and the treehouse worktree lease also means
+# a refusal orphans neither, and writes no state/<id>.status - fm-teardown refuses
+# to run without a meta, so a status file written this early could not be cleaned up
+# by any normal path. Hence a plain stderr message here, not spawn_fail: there is no
+# window to name and no meta to reconcile yet.
+#
+# The root holds more than Go build scratch now: the qwen adapter puts qwen's
+# HIGHEST-precedence configuration layer (its system settings) here, so whoever can
+# create or replace entries in this directory controls a --yolo crewmate's config -
+# it could add hooks or mcpServers that qwen executes. OWNERSHIP is the real gate,
+# and a bare `mkdir -p` silently accepts a pre-created foreign-owned directory.
+# Mode is repaired rather than demanded: creating or replacing an entry needs a
+# group/other WRITE bit, which an owner-owned 0755 directory does not grant, and the
+# settings file is 0600 so directory readability leaks nothing. Refusing a
+# pre-existing owner-owned 0755 root would buy no security and would break the first
+# respawn of every task created before this block existed (dead-pane recovery,
+# /updatefirstmate, restart) on every harness, since the old bare `mkdir -p` left
+# 0755 roots that only teardown removes. So chmod it and carry on: self-healing.
+TASK_TMP="/tmp/fm-$ID"
+task_tmp_refuse() {  # <detail>
+  echo "error: per-task temp root $TASK_TMP $1; refusing to spawn rather than trust a directory firstmate does not own. Remove or fix it, then respawn" >&2
+  exit 1
+}
+if [ -L "$TASK_TMP" ]; then
+  task_tmp_refuse "is a symlink"
+elif [ -e "$TASK_TMP" ]; then
+  [ -d "$TASK_TMP" ] || task_tmp_refuse "exists and is not a directory"
+  [ -O "$TASK_TMP" ] || task_tmp_refuse "is owned by another user"
+  chmod 700 "$TASK_TMP" || task_tmp_refuse "could not be restricted to owner-only 700"
+else
+  ( umask 077 && mkdir "$TASK_TMP" ) || task_tmp_refuse "could not be created"
+fi
+
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1407,36 +1445,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-#
-# This root is PRIVATE (0700, owner-only) and its creation FAILS CLOSED, because
-# /tmp is world-writable and sticky and the path is fully predictable from the task
-# id. It no longer holds only Go build scratch: the qwen adapter puts qwen's
-# highest-precedence configuration layer (its system settings) here, so whoever
-# controls this directory controls a --yolo crewmate's config - it could add hooks
-# or mcpServers that qwen executes. A bare `mkdir -p` silently accepts a
-# pre-created foreign-owned directory, so refuse anything that is not a directory
-# this user owns at mode 700, and never follow a symlink standing in for it.
-TASK_TMP="/tmp/fm-$ID"
-task_tmp_refuse() {  # <detail>
-  spawn_fail "per-task temp root $TASK_TMP $1; refusing to spawn rather than trust a directory firstmate does not own. Remove or fix it, then respawn"
-  exit 1
-}
-if [ -L "$TASK_TMP" ]; then
-  task_tmp_refuse "is a symlink"
-elif [ -e "$TASK_TMP" ]; then
-  [ -d "$TASK_TMP" ] || task_tmp_refuse "exists and is not a directory"
-  [ -O "$TASK_TMP" ] || task_tmp_refuse "is owned by another user"
-  TASK_TMP_MODE=$(fm_inherit_file_mode "$TASK_TMP")
-  [ "$TASK_TMP_MODE" = 700 ] \
-    || task_tmp_refuse "has mode ${TASK_TMP_MODE:-unreadable}, not the required owner-only 700"
-else
-  ( umask 077 && mkdir "$TASK_TMP" ) || task_tmp_refuse "could not be created"
-fi
+# Go's build temp nests at gotmp/ inside the per-task root claimed and validated
+# near the top of this script. Go won't create GOTMPDIR, so mkdir before it is used;
+# fm-teardown removes the whole root. Nested (not a bare /tmp/fm-<id>/gotmp) so
+# other per-task temp can live alongside later, and teardown cleans one
+# deterministic path. GOTMPDIR (not TMPDIR) is the targeted knob: TMPDIR is too
+# broad (affects every program's temp, not just Go's).
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches

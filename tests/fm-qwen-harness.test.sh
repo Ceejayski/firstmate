@@ -276,22 +276,67 @@ test_qwen_system_settings_refuses_an_untrusted_path() {
     || fail "firstmate followed the symlink and truncated the file it points at"
   rm -rf "/tmp/fm-$id"
 
-  # (b) A pre-created, loosely-permissioned temp root is somebody else's directory
-  # to write into, even when this user owns it.
-  id=qwen-tmpmode-q9
-  rec=$(make_spawn_case tmpmode "$id")
+  # (b) A file, or a symlink, standing in for the temp root itself. Ownership is the
+  # gate, so a path that is not a directory this user owns is refused outright.
+  id=qwen-tmpfile-q9
+  rec=$(make_spawn_case tmpfile "$id")
   read_spawn_record "$rec"
-  mkdir -p "/tmp/fm-$id"
-  chmod 777 "/tmp/fm-$id"
+  printf 'not a directory\n' > "/tmp/fm-$id"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
-  [ "$rc" -ne 0 ] || fail "a qwen spawn accepted a world-writable per-task temp root and exited 0"
-  assert_contains "$out" "not the required owner-only 700" \
-    "the spawn failure did not name the unsafe temp-root mode"
-  assert_absent "/tmp/fm-$id/qwen-system-settings.json" \
-    "firstmate wrote qwen's system settings into a world-writable directory"
-  rm -rf "/tmp/fm-$id"
+  [ "$rc" -ne 0 ] || fail "a qwen spawn accepted a non-directory per-task temp root and exited 0"
+  assert_contains "$out" "exists and is not a directory" \
+    "the temp-root refusal did not say why it refused"
+  # The guard runs before any resource is taken, so it must leave nothing behind.
+  # fm-teardown refuses to run without a meta, so a status file written this early
+  # could never be cleaned up by a normal path.
+  assert_absent "$HOME_DIR/state/$id.status" \
+    "the temp-root refusal wrote a status file that fm-teardown could never remove"
+  assert_absent "$HOME_DIR/state/$id.meta" "the temp-root refusal ran after the meta write"
+  rm -f "/tmp/fm-$id"
+
+  id=qwen-tmplink-q10
+  rec=$(make_spawn_case tmplink "$id")
+  read_spawn_record "$rec"
+  ln -s "$CASE_DIR" "/tmp/fm-$id"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a qwen spawn followed a symlinked per-task temp root and exited 0"
+  assert_contains "$out" "is a symlink" "the temp-root refusal did not say why it refused"
+  assert_absent "$CASE_DIR/qwen-system-settings.json" \
+    "firstmate wrote qwen's system settings through a symlinked temp root"
+  rm -f "/tmp/fm-$id"
+
+  # A foreign-owned root needs another uid to set up, so pin the ownership gate at
+  # the source instead; the refusals above prove the surrounding branch runs.
+  # shellcheck disable=SC2016  # single quotes are deliberate: this is the source line to match, not an expansion
+  assert_source_line '  [ -O "$TASK_TMP" ] || task_tmp_refuse "is owned by another user"' \
+    "$SPAWN" "the per-task temp root no longer refuses a directory owned by another user"
   pass "fm-spawn: qwen's system-settings path is refused unless firstmate provably owns it"
+}
+
+# Ownership is the gate, not mode: creating or replacing an entry in the temp root
+# needs a group/other WRITE bit, which an owner-owned 0755 directory does not grant,
+# and the settings file is 0600 so directory readability leaks nothing. Refusing
+# 0755 would buy nothing and would break the first respawn of every task whose root
+# predates this guard - on every harness, since the block is harness-agnostic and
+# the old bare `mkdir -p` left 0755 roots that only teardown removes.
+test_task_tmp_root_repairs_a_pre_existing_loose_mode() {
+  local id rec out rc
+  id=qwen-tmprepair-q11
+  rec=$(make_spawn_case tmprepair "$id")
+  read_spawn_record "$rec"
+  mkdir -p "/tmp/fm-$id"
+  chmod 755 "/tmp/fm-$id"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "a respawn onto a pre-existing owner-owned 0755 temp root was refused"
+  assert_contains "$out" "spawned $id harness=qwen" \
+    "a respawn onto a pre-existing owner-owned 0755 temp root did not report success"
+  [ "$(file_mode "/tmp/fm-$id")" = 700 ] \
+    || fail "the pre-existing temp root was not repaired to 700: $(file_mode "/tmp/fm-$id")"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn: a pre-existing owner-owned temp root is repaired to 700, not refused"
 }
 
 # The captain's provider credentials live in the same file qwen would rewrite if
@@ -689,6 +734,7 @@ test_existing_launch_templates_are_byte_pinned
 test_qwen_launch_is_verified
 test_qwen_spawn_never_writes_the_captain_settings_file
 test_qwen_system_settings_refuses_an_untrusted_path
+test_task_tmp_root_repairs_a_pre_existing_loose_mode
 test_qwen_spawn_preserves_a_project_owned_workspace_settings_file
 test_qwen_startup_prompt_is_dismissed_only_when_present
 test_qwen_startup_prompt_is_dismissed_when_it_arrives_late
