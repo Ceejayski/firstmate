@@ -16,12 +16,13 @@ chrome-devtools-axi open "file://$PWD/docs/verification/showcase-skill/directed.
 chrome-devtools-axi screenshot --output /tmp/directed.png
 ```
 
-Both committed mocks render as intended in Chrome, last confirmed on 2026-08-03.
+Both committed mocks render as intended in Chrome, last confirmed on 2026-08-04.
 
 The baseline's accessibility snapshot exposes a status card with heading, caption, and one link.
-The directed mock's snapshot exposes the main landmark, the "OWNER ARCHIVE" eyebrow text, the heading, the caption paragraph, the link, and the aside text - no list node and no aria-label.
-That is deliberate: the eight frames carry no text of their own, so the "eight frames, zero curses" state reaches assistive tech through the caption paragraph alone, and the grid is marked `aria-hidden` as the decoration it is rather than carrying an aria-label naming a structure no screen reader could usefully walk.
-For the same reason the decorative stamp sits in a wrapping `<div class="frames-wall">` rather than inside the `<ul>`, so the list has only `<li>` children.
+The directed mock's snapshot exposes the main landmark, the "OWNER ARCHIVE" eyebrow text, the heading, the caption paragraph, the link, and the aside text, with no list node among them.
+That absence is a property of the snapshot view rather than of the markup: the command flattens structural containers, and a default-styled `<ul aria-label="...">` injected into the same page prints as bare text nodes too, so this output is not evidence about what a screen reader announces.
+What is committed is a labelled list - `<ul class="frames" aria-label="Empty archive wall, eight waiting frames">` with eight `<li>` children and no `aria-hidden` - which Chrome exposes as a named list.
+The name lives there because the eight frames carry no text of their own, and the decorative stamp sits in a wrapping `<div class="frames-wall">` rather than inside the `<ul>`, so the list has only `<li>` children.
 
 Both mocks label the primary button in ink rather than white, because white on `#e8352a` is 4.22:1, under the 4.5:1 the skill's own precedence rail demands, while ink on the same red is 4.69:1.
 Chrome confirms the rendered values: the CTA computes to `rgb(10, 10, 10)` on `rgb(232, 53, 42)`.
