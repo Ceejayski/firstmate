@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Static regression tests for the captain-facing plain-English translation
-# contract owned by AGENTS.md section 9.
+# contract owned by AGENTS.md section 9, plus the standalone guard that keeps
+# public skills in skills/*/SKILL.md free of firstmate paths, helpers, state,
+# and house vocabulary (contract stated in README "Two-tier skill layout").
 # shellcheck disable=SC2016
 set -u
 
