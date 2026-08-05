@@ -348,6 +348,12 @@ print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
 subsection "Work under way (state/*.meta)"
 META_FOUND=0
+# Bounded stranded-custody checks per digest (see the quota line below). Each
+# costs one read-only no-mistakes subprocess, and a fleet-wide limit death makes
+# every task a candidate at once.
+QUOTA_CUSTODY_BUDGET=${FM_SESSION_START_CUSTODY_BUDGET:-6}
+case "$QUOTA_CUSTODY_BUDGET" in ''|*[!0-9]*) QUOTA_CUSTODY_BUDGET=6 ;; esac
+QUOTA_CUSTODY_DEFERRED=0
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
@@ -368,14 +374,28 @@ for meta in "$STATE"/*.meta; do
     printf 'endpoint: unknown (no window recorded)\n'
   fi
 
-  # A provider limit death leaves an alive endpoint, no status append and no
-  # turn-end hook, so nothing above can see it - and the recovery session is
-  # exactly where hours of idle are won back. bin/fm-limit-sense.sh reads it
-  # from the durable session transcript, which survived whatever killed the
-  # worker. This is the one place the bounded stranded-custody check runs
-  # (once per session, on a limit-dead task only), because a run killed
-  # mid-validation leaves its commits in the local gate.
-  printf 'quota: %s\n' "$("$SCRIPT_DIR/fm-limit-sense.sh" "$id" 2>/dev/null || printf 'limit: unknown')"
+  quota=$("$SCRIPT_DIR/fm-limit-sense.sh" --no-pipeline "$id" 2>/dev/null) \
+    || quota='limit: unknown'
+  # A limit-dead task may also have had a validation run killed mid-step,
+  # stranding its commits in the local gate. That answer costs a bounded
+  # read-only subprocess, so it is asked here (the recovery session, where it
+  # is worth knowing) and only for tasks that are actually dead - but the
+  # failure this sensor exists for is COMMON MODE: one limit kills the whole
+  # fleet at once, so "dead tasks" is routinely "every task". The budget keeps
+  # a fleet-wide death from turning session start into a serial wait, and a
+  # spent budget is reported rather than silently truncated.
+  case "$quota" in
+    "limit: dead"*)
+      if [ "$QUOTA_CUSTODY_BUDGET" -gt 0 ]; then
+        QUOTA_CUSTODY_BUDGET=$((QUOTA_CUSTODY_BUDGET - 1))
+        quota=$("$SCRIPT_DIR/fm-limit-sense.sh" "$id" 2>/dev/null) || quota='limit: unknown'
+      else
+        QUOTA_CUSTODY_DEFERRED=$((QUOTA_CUSTODY_DEFERRED + 1))
+        quota="$quota · pipeline=not-checked"
+      fi
+      ;;
+  esac
+  printf 'quota: %s\n' "$quota"
 
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
@@ -385,6 +405,11 @@ for meta in "$STATE"/*.meta; do
   fi
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+if [ "$QUOTA_CUSTODY_DEFERRED" -gt 0 ]; then
+  printf '\nquota: stranded-validation check deferred for %s further limit-dead task(s) (budget %s).\n' \
+    "$QUOTA_CUSTODY_DEFERRED" "${FM_SESSION_START_CUSTODY_BUDGET:-6}"
+  printf 'Run bin/fm-limit-sense.sh --pipeline <id> for any of them before deciding they only need restarting.\n'
+fi
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0

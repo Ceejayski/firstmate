@@ -195,7 +195,7 @@ classify_text() {  # <text> -> limit|transient|auth|benign|unrecognized
     *"out of usage credits"*|*"Usage credits are required"*|\
     *"include usage credits"*|*"out of usage"*)
       printf 'limit' ;;
-    "API Error:"*|*"API Error:"*)
+    *"API Error:"*)
       printf 'transient' ;;
     *)
       printf 'unrecognized' ;;

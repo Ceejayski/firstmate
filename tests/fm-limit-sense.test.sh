@@ -301,6 +301,22 @@ assert_contains "$DIGEST" "quota: limit: unknown" \
   "the fleet digest must say unknown for an unverified adapter"
 pass "fm-session-start.sh: the fleet digest carries a per-task quota line"
 
+# The stranded-validation check costs a subprocess per limit-dead task, and the
+# failure it exists for is common mode: one limit kills the whole fleet, so
+# "dead tasks" is routinely "every task". The budget must bound that, and a
+# spent budget must be reported rather than silently truncated.
+DIGEST0=$(cd "$HOME_DIR" && FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$STATE_DIR" FM_CLAUDE_PROJECTS_DIR="$PROJECTS_DIR" \
+  FM_SESSION_START_CUSTODY_BUDGET=0 FM_BOOTSTRAP_DETECT_ONLY=1 \
+  "$ROOT/bin/fm-session-start.sh" 2>/dev/null || true)
+assert_contains "$DIGEST0" "pipeline=not-checked" \
+  "a deferred custody check must say so on the task's own line"
+assert_contains "$DIGEST0" "stranded-validation check deferred" \
+  "a spent budget must be reported, never silently truncated"
+assert_contains "$DIGEST0" "fm-limit-sense.sh --pipeline" \
+  "the deferral note must name the command that answers the deferred question"
+pass "fm-session-start.sh: the custody-check budget is bounded and never silent"
+
 # --- (k) watcher heartbeat annotation --------------------------------------
 
 # Exercise the real function from the real script rather than re-implementing
