@@ -258,6 +258,68 @@ grep -n 'axi sync' "$SENSE" | grep -v -- '--check' | grep -q . \
   && fail "every 'axi sync' call must carry --check"
 pass "no agent is sent anything; every pipeline read is --check only"
 
+# --- (h2) stranded validation custody --------------------------------------
+
+# A run killed mid-validation leaves its commits in the local gate. The sensor
+# asks `axi sync --check` (read-only) and reports the custody answer. Driven by
+# a fake no-mistakes that serves the real TOON shape, so both the parse and the
+# --check-only guarantee are covered rather than assumed.
+NM_BIN="$TMP_ROOT/nm-bin"
+mkdir -p "$NM_BIN"
+NM_CALLS="$TMP_ROOT/nm-calls"
+cat > "$NM_BIN/no-mistakes" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$NM_CALLS"
+cat <<'TOON'
+branch_sync:
+  state: stranded_terminal_run
+  next_action:
+    code: recover_custody
+    note: unpublished pipeline commits are held by a terminal run
+TOON
+SH
+chmod +x "$NM_BIN/no-mistakes"
+
+: > "$NM_CALLS"
+OUT=$(PATH="$NM_BIN:$PATH" "$SENSE" session-limit 2>/dev/null)
+expect_code 0 "$?" "the custody check must not change the exit status"
+assert_contains "$OUT" "limit: dead" "the custody check must not change the verdict"
+assert_contains "$OUT" "pipeline=recover-custody" \
+  "a stranded validation must be surfaced on the limit-dead line"
+assert_grep "axi sync --check" "$NM_CALLS" "the custody read must go through axi sync --check"
+assert_no_grep "--recover" "$NM_CALLS" "the sensor must never return custody itself"
+grep -v -- '--check' "$NM_CALLS" | grep -q 'axi sync' \
+  && fail "every axi sync invocation must carry --check"
+pass "stranded validation -> pipeline=recover-custody via a read-only --check"
+
+# A healthy branch answers no custody question, so the field stays absent.
+cat > "$NM_BIN/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'branch_sync:\n  state: in_sync\n  next_action:\n    code: none\n'
+SH
+chmod +x "$NM_BIN/no-mistakes"
+OUT=$(PATH="$NM_BIN:$PATH" "$SENSE" session-limit 2>/dev/null)
+assert_not_contains "$OUT" "pipeline=" "a branch in sync must not claim stranded custody"
+pass "no stranded validation -> no pipeline field"
+
+# --no-pipeline must not shell out at all, and a recovered task must not pay
+# for the check unless it is explicitly asked for.
+cat > "$NM_BIN/no-mistakes" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$NM_CALLS"
+printf 'branch_sync:\n  next_action:\n    code: recover_custody\n'
+SH
+chmod +x "$NM_BIN/no-mistakes"
+: > "$NM_CALLS"
+PATH="$NM_BIN:$PATH" "$SENSE" session-limit --no-pipeline >/dev/null 2>&1
+[ -s "$NM_CALLS" ] && fail "--no-pipeline must not run any no-mistakes subprocess"
+PATH="$NM_BIN:$PATH" "$SENSE" recovered >/dev/null 2>&1
+[ -s "$NM_CALLS" ] && fail "a recovered task must not pay for the custody check by default"
+OUT=$(PATH="$NM_BIN:$PATH" "$SENSE" recovered --pipeline 2>/dev/null)
+assert_contains "$OUT" "pipeline=recover-custody" \
+  "--pipeline must ask the custody question for a recovered task too"
+pass "custody check runs only where it is wanted"
+
 # --- (i) fm-crew-state.sh detail -------------------------------------------
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
