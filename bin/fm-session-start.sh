@@ -40,7 +40,9 @@
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       state/.afk, a cheap per-task endpoint-liveness read, and
+#                       a per-task quota line from bin/fm-limit-sense.sh naming
+#                       any provider limit death the endpoint read cannot see:
 #                       read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
@@ -365,6 +367,15 @@ for meta in "$STATE"/*.meta; do
   else
     printf 'endpoint: unknown (no window recorded)\n'
   fi
+
+  # A provider limit death leaves an alive endpoint, no status append and no
+  # turn-end hook, so nothing above can see it - and the recovery session is
+  # exactly where hours of idle are won back. bin/fm-limit-sense.sh reads it
+  # from the durable session transcript, which survived whatever killed the
+  # worker. This is the one place the bounded stranded-custody check runs
+  # (once per session, on a limit-dead task only), because a run killed
+  # mid-validation leaves its commits in the local gate.
+  printf 'quota: %s\n' "$("$SCRIPT_DIR/fm-limit-sense.sh" "$id" 2>/dev/null || printf 'limit: unknown')"
 
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
