@@ -87,9 +87,10 @@ SEP=' · '
 # and annotating it would be noise. The sensor never fails a caller, so a
 # missing transcript or unrecognized row simply adds nothing.
 #
-# `--no-pipeline` keeps this strictly read-cheap (one grep over one file): the
-# stranded-custody question costs a bounded no-mistakes subprocess and is asked
-# once per session by the session-start digest, not on every state read.
+# `--no-pipeline` keeps this read-cheap (a bounded read of one transcript): the
+# stranded-custody question costs a bounded no-mistakes subprocess, so it is
+# asked by the session-start digest under a per-digest budget
+# (FM_SESSION_START_CUSTODY_BUDGET), not on every state read.
 # FM_CREW_STATE_LIMIT_SENSE=0 disables the annotation entirely.
 limit_death_detail() {  # <state> <source>
   [ "${FM_CREW_STATE_LIMIT_SENSE:-1}" = 1 ] || return 0

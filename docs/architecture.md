@@ -36,6 +36,12 @@ Only when no matching run exists does it fall back to the pane busy-signature an
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 For herdr, that pane fallback trusts a native `busy` verdict outright, but corroborates native `idle` or unknown verdicts against the recorded harness's rendered busy signature before deciding the crew is not working.
+
+A provider quota death is the one stop none of those sources can see: it appends no status line, fires no turn-end hook, and leaves a pane that reads exactly like an idle one, while the watcher that would notice is a casualty of the same limit.
+`bin/fm-limit-sense.sh <id>` reads it from the harness session transcript instead - the durable record that outlives the pane, the session and the orchestrator - and prints one `limit: none|dead|recovered|unknown` line; its header owns the classification predicate, the reset-time contract, and the per-harness adapter coverage (claude only; every other harness reports `unknown`).
+It is detection only: it resumes nothing, sends nothing, and writes nothing anywhere, and it never fails a caller, so a missing transcript degrades to `unknown` rather than to a guess.
+Its three consumers are annotations on surfaces that already exist: `fm-crew-state.sh` appends a `limit-dead` detail to its line, the session-start fleet digest prints a per-task `quota:` line, and a firing heartbeat carries `limit-dead=<id>` without ever changing whether that heartbeat fires or is absorbed.
+
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
