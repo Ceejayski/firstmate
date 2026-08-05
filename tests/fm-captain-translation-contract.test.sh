@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Static regression tests for the captain-facing plain-English translation
-# contract owned by AGENTS.md section 9.
+# contract owned by AGENTS.md section 9, plus the standalone guard that keeps
+# public skills in skills/*/SKILL.md free of firstmate paths, helpers, state,
+# and house vocabulary (contract stated in README "Two-tier skill layout").
 # shellcheck disable=SC2016
 set -u
 
@@ -291,3 +293,36 @@ test_ahoy_readme_uses_cross_harness_convention
 test_ahoy_owns_only_the_visible_session_recap
 test_ahoy_scans_visible_history_for_open_decisions
 test_ahoy_user_role_injections_share_one_marker
+
+# Leaks that would stop a public skill in skills/*/SKILL.md from standing on its
+# own once installed into someone else's project: this repo's private trees, its
+# helper scripts, its FM_HOME-relative state, and its house vocabulary.
+# Each entry is "<description>|<ERE>". The generic directory names are matched
+# only in path-like context (rooted at /, ~/, ./, $VAR/, or opening a code span)
+# so ordinary prose - "loading state/empty state", "tailwind config/theme tokens"
+# - does not trip a guard about paths.
+PUBLIC_SKILL_LEAKS=(
+  'the private .agents/ skill tree|(^|[^[:alnum:]_-])\.agents/'
+  'a private bin/fm-* helper script|(^|[^[:alnum:]_-])bin/fm-'
+  'FM_HOME-relative state|FM_HOME'
+  'a private project path|(`|~/|\./|\$[A-Za-z_][A-Za-z0-9_]*/|/)(data|state|config|projects)/'
+  'firstmate house vocabulary|(^|[^[:alnum:]])(firstmate|first mate|second mate|crewmate|captain)'
+)
+
+test_public_skills_are_standalone() {
+  local skill_file entry description pattern hit
+  for skill_file in "$ROOT"/skills/*/SKILL.md; do
+    [ -f "$skill_file" ] || continue
+    for entry in "${PUBLIC_SKILL_LEAKS[@]}"; do
+      description=${entry%%|*}
+      pattern=${entry#*|}
+      hit=$(grep -nEi "$pattern" "$skill_file" | head -1)
+      if [ -n "$hit" ]; then
+        fail "Public skill ${skill_file#"$ROOT"/} references $description: $hit"
+      fi
+    done
+  done
+  pass "Public skills are standalone"
+}
+
+test_public_skills_are_standalone

@@ -20,9 +20,9 @@ Both committed mocks render as intended in Chrome, last confirmed on 2026-08-04.
 
 The baseline's accessibility snapshot exposes a status card with heading, caption, and one link.
 The directed mock's snapshot exposes the main landmark, the "OWNER ARCHIVE" eyebrow text, the heading, the caption paragraph, the link, and the aside text, with no list node among them.
-That absence is a property of the snapshot view rather than of the markup: the command flattens structural containers, and a default-styled `<ul aria-label="...">` injected into the same page prints as bare text nodes too, so this output is not evidence about what a screen reader announces.
-What is committed is a labelled list - `<ul class="frames" aria-label="Empty archive wall, eight waiting frames">` with eight `<li>` children and no `aria-hidden` - which Chrome exposes as a named list.
-The name lives there because the eight frames carry no text of their own, and the decorative stamp sits in a wrapping `<div class="frames-wall">` rather than inside the `<ul>`, so the list has only `<li>` children.
+That absence is the committed markup, not an artifact of the snapshot view: the grid is `<ul class="frames" aria-hidden="true">` with eight `<li>` children, so it is deliberately outside the accessibility tree.
+The eight frames are decorative, and hiding them costs nothing announceable: they carry no text of their own, the caption paragraph above already says "Eight frames, zero curses" in words, and the two texts that do sit in the wall - the `.reserved-note` inside slot 1 and the "NO CURSES YET" stamp in the wrapping `<div class="frames-wall">` - each carry their own `aria-hidden` because they read as marks on paper rather than as content.
+The alternative, a labelled list, would make a screen reader walk eight empty items to learn what the caption states in one sentence.
 
 Both mocks label the primary button in ink rather than white, because white on `#e8352a` is 4.22:1, under the 4.5:1 the skill's own precedence rail demands, while ink on the same red is 4.69:1.
 Chrome confirms the rendered values: the CTA computes to `rgb(10, 10, 10)` on `rgb(232, 53, 42)`.
