@@ -19,6 +19,8 @@
 #   (b) session limit / weekly limit / out of credits -> dead, class=limit
 #   (c) both reset forms parse to an absolute UTC instant
 #   (d) 529 -> class=transient; /login 403 -> class=auth
+#   (d2) a row whose TEXT this version does not recognize is still classified by
+#       its own error/apiErrorStatus/isApiErrorMessage fields
 #   (e) real activity after the death -> recovered
 #   (f) a clean session -> none
 #   (g) non-claude harness, missing transcript, missing meta, missing jq ->
@@ -142,6 +144,69 @@ assert_contains "$OUT" "limit: dead" "a login prompt that ended the turn must re
 assert_contains "$OUT" "class=auth" \
   "a /login 403 must classify as auth - it needs a human and must never auto-resume"
 pass "login 403 -> dead, class=auth"
+
+# --- (d2) structural corroboration for an unrecognized message -------------
+#
+# These rows are DELIBERATELY synthesized rather than captured, and are the one
+# exception to the real-rows rule above: an unrecognized text cannot by
+# definition be one of the captured messages, and this branch - the hardening
+# that keeps a drifted message family classifiable across CLI versions - is
+# otherwise never exercised at all. Their field SHAPE is still the captured one.
+#
+# install_drifted <id> <row-json> - a lone synthetic assistant row.
+install_drifted() {
+  local id=$1 row=$2 wt dir
+  wt="$WT_ROOT/$id"
+  dir="$PROJECTS_DIR/$(slug_of "$wt")"
+  mkdir -p "$wt" "$dir"
+  printf '%s\n' "$row" > "$dir/fixture-session.jsonl"
+  fm_write_meta "$STATE_DIR/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$wt" \
+    "harness=claude" \
+    "kind=ship"
+}
+
+# No `.error` at all: the fields after it are empty, which is exactly the case a
+# tab-separated read collapses and shifts left.
+install_drifted drift-429 '{"type":"assistant","timestamp":"2026-08-01T09:12:00Z","apiErrorStatus":429,"isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"Quota exhausted for this workspace; see the console for details."}]}}'
+OUT=$(sense drift-429)
+assert_contains "$OUT" "limit: dead" "an unrecognized 429 row must still report dead"
+assert_contains "$OUT" "class=limit" \
+  "apiErrorStatus 429 must classify an unrecognized message as limit"
+# Also proves the fields did not shift: the timestamp is field two.
+assert_contains "$OUT" "since=2026-08-01T09:12:00Z" \
+  "a timestamp with no fractional seconds must not gain a second Z"
+assert_not_contains "$OUT" "ZZ" "the death instant must be a single well-formed UTC stamp"
+assert_not_contains "$OUT" "reset=" "a message with no reset text must not invent one"
+pass "unrecognized text + 429 -> dead, class=limit"
+
+install_drifted drift-401 '{"type":"assistant","timestamp":"2026-08-01T09:13:00.250Z","apiErrorStatus":401,"isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"Your credentials could not be verified for this workspace."}]}}'
+OUT=$(sense drift-401)
+assert_contains "$OUT" "class=auth" "apiErrorStatus 401 must classify as auth"
+assert_contains "$OUT" "since=2026-08-01T09:13:00Z" "fractional seconds are dropped, not the Z"
+pass "unrecognized text + 401 -> class=auth"
+
+install_drifted drift-503 '{"type":"assistant","timestamp":"2026-08-01T09:14:00.100Z","apiErrorStatus":503,"isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"The upstream service did not answer in time."}]}}'
+OUT=$(sense drift-503)
+assert_contains "$OUT" "class=transient" "a 5xx must classify as transient, never as limit"
+pass "unrecognized text + 5xx -> class=transient"
+
+# Not an API error at all: a harness meta message this version does not know by
+# name is still benign, and benign must never read as dead.
+install_drifted drift-benign '{"type":"assistant","timestamp":"2026-08-01T09:15:00.000Z","isApiErrorMessage":false,"message":{"model":"<synthetic>","content":[{"type":"text","text":"Continuing from a previous conversation."}]}}'
+OUT=$(sense drift-benign)
+assert_contains "$OUT" "limit: none" \
+  "a synthetic row that is not an API error must report none, never dead"
+assert_not_contains "$OUT" "dead" "a non-error synthetic row must never report dead"
+pass "unrecognized text + no API error -> none"
+
+# An error with nothing that names it stays honestly unknown.
+install_drifted drift-opaque '{"type":"assistant","timestamp":"2026-08-01T09:16:00.000Z","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"Something went wrong."}]}}'
+OUT=$(sense drift-opaque)
+assert_contains "$OUT" "limit: unknown" "an unclassifiable error row must report unknown"
+assert_not_contains "$OUT" "class=" "the sensor must not name a class it did not establish"
+pass "unrecognized text + unnamed error -> unknown"
 
 # --- (e) recovery ----------------------------------------------------------
 
@@ -434,10 +499,16 @@ pass "fm-watch.sh: annotation only, never a new firing condition"
 # What is asserted is only what is DURABLE. §3.3's per-worktree verdicts are
 # not: transcripts keep growing, and the fleet has taken further limit deaths
 # since - including one that hit this repo's own worktree, the report's negative
-# control, mid-implementation. So the reproduction pins the two durable claims:
-# every live worktree returns a valid verdict and exits 0, and every recorded
-# §3.3 death that is still the newest death in its transcript reproduces at its
-# exact recorded instant with the 08:10Z reset the report independently states.
+# control, mid-implementation. The durable claim, and the only one this case
+# enforces, is that the real end-to-end path over the real ~/.claude directories
+# returns a valid verdict for every live worktree and never fails its caller.
+# A recorded death that is STILL the newest death in its transcript is checked
+# byte-exactly on top of that, but its absence is not a failure: any new session
+# in one of these worktrees permanently retires that recording, so requiring one
+# would make the suite fail on its own over time. Byte-exact reproduction
+# belongs to the committed fixtures under tests/fixtures/limit-sense/, which are
+# real captured rows and hermetic; when no recording survives here, this case
+# reports a skip - and a skip is not coverage.
 LIVE_STATE="$TMP_ROOT/live-state"
 mkdir -p "$LIVE_STATE"
 LIVE_RUN=0
@@ -477,9 +548,10 @@ $HOME/.treehouse/firstmate-253838/4/firstmate	-
 LIVE
 if [ "$LIVE_RUN" -eq 0 ]; then
   echo "skip: report §3.3 live worktrees not present on this machine"
+elif [ "$LIVE_EXACT" -eq 0 ]; then
+  pass "report §3.3: $LIVE_RUN live worktree(s) read, every one a valid verdict"
+  echo "skip: no recorded §3.3 death is still the newest in its transcript - all $LIVE_RUN have been superseded by newer sessions, so byte-exact reproduction was NOT checked here; the committed tests/fixtures/limit-sense/ cases are the coverage for that"
 else
-  [ "$LIVE_EXACT" -gt 0 ] || \
-    fail "no recorded §3.3 death reproduced; all $LIVE_RUN transcript(s) have moved on"
   pass "report §3.3: $LIVE_RUN live worktree(s) read, $LIVE_EXACT recorded death(s) reproduced exactly"
 fi
 

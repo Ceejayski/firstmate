@@ -596,6 +596,24 @@ families_for_test_reference() {
   [ "$found" -eq 1 ]
 }
 
+# A fixture belongs to its SUITE directory - the path segment directly under
+# tests/fixtures/ - which is what a suite names when it points at its fixtures.
+# Deeper per-case directories are tried afterwards so a flat layout and a
+# per-case layout both resolve, and so the mapping never depends on a leaf case
+# directory happening to appear verbatim in the suite file.
+families_for_fixture_path() {
+  local rest=$1 dir
+  rest=${rest#tests/fixtures/}
+  while [ "$rest" != "${rest%/*}" ]; do
+    dir=${rest%%/*}
+    rest=${rest#*/}
+    if families_for_test_reference "$dir"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Conservative path → family map. Over-selects rather than under-selects.
 # Never expands to the complete suite.
 families_for_changed_path() {
@@ -712,9 +730,7 @@ families_for_changed_path() {
         || printf '%s\n' "__unmapped__:$path"
       ;;
     tests/fixtures/*)
-      # A fixture belongs to whichever suite names its directory, so a new
-      # captured fixture selects that suite instead of dying as unmapped.
-      families_for_test_reference "$(basename "$(dirname "$path")")" \
+      families_for_fixture_path "$path" \
         || printf '%s\n' "__unmapped__:$path"
       ;;
     bin/*)

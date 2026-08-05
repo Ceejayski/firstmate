@@ -176,8 +176,21 @@ FIELDS=$(printf '%s' "$ROW" | jq -r '
   | @tsv' 2>/dev/null) || FIELDS=
 [ -n "$FIELDS" ] || emit
 
-IFS=$(printf '\t') read -r TEXT TS ERRKIND ERRSTATUS ISERR <<EOF
-$FIELDS
+# Split positionally, one field per line. `IFS=<tab> read` cannot be used here:
+# tab is an IFS *whitespace* character, so runs of tabs collapse and an empty
+# field shifts every later field left, silently disabling the structural
+# corroboration below. @tsv escapes any literal tab or newline inside a field as
+# a two-character sequence, so no field can contain either and this split is
+# lossless.
+TEXT=''; TS=''; ERRKIND=''; ERRSTATUS=''; ISERR=''
+{
+  IFS= read -r TEXT
+  IFS= read -r TS
+  IFS= read -r ERRKIND
+  IFS= read -r ERRSTATUS
+  IFS= read -r ISERR
+} <<EOF
+$(printf '%s' "$FIELDS" | tr '\t' '\n')
 EOF
 
 # --- part two of the predicate: classify WITHIN the synthetic set -----------
@@ -244,10 +257,11 @@ case "$KIND" in
 esac
 
 CLASS=$KIND
+# Drop fractional seconds only when there are any, so a timestamp that already
+# ends in Z is never emitted as `...ZZ`.
 case "$TS" in
-  *T*Z) SINCE=${TS%%.*}Z ;;
-  '')   SINCE= ;;
-  *)    SINCE=$TS ;;
+  *T*.*Z) SINCE=${TS%%.*}Z ;;
+  *)      SINCE=$TS ;;
 esac
 
 # --- death or recovery ------------------------------------------------------
