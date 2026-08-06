@@ -262,6 +262,7 @@ test_x_collector_rejects_bad_input_without_partials() {
   write_post_fixture "$FM_FAKE_X_DIR" "$ID_PRIVATE" TestUser 401
 
   # (e) a handle carrying shell metacharacters is refused before any fetch.
+  # shellcheck disable=SC2016 # Literal command substitution probes handle validation.
   out=$(PATH="$fakebin:$PATH" FM_X_COLLECT_DIR="$dest" \
     FM_X_API="https://api.example.invalid" "$X_COLLECT" 'evil$(id)/../x' 2>&1)
   rc=$?
