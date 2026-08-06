@@ -78,10 +78,43 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
+# A provider limit death is invisible to every source above: it does not append
+# a status line, it does not fire the turn-end hook, and it leaves a pane that
+# reads exactly like an idle one. bin/fm-limit-sense.sh reads it from the
+# session transcript instead, so a crew stopped by a quota is distinguishable
+# from a crew that is merely quiet. Only a `dead` verdict is annotated -
+# `recovered` is the normal steady state of a fleet that has ever hit a limit,
+# and annotating it would be noise. The sensor never fails a caller, so a
+# missing transcript or unrecognized row simply adds nothing.
+#
+# `--no-pipeline` keeps this read-cheap (a bounded read of one transcript): the
+# stranded-custody question costs a bounded no-mistakes subprocess, so it is
+# asked by the session-start digest under a per-digest budget
+# (FM_SESSION_START_CUSTODY_BUDGET), not on every state read.
+# FM_CREW_STATE_LIMIT_SENSE=0 disables the annotation entirely.
+limit_death_detail() {  # <state> <source>
+  [ "${FM_CREW_STATE_LIMIT_SENSE:-1}" = 1 ] || return 0
+  # A busy pane is live proof the agent is running right now, so the one hot
+  # path that already knows the answer never pays for the transcript read.
+  [ "$1" = working ] && [ "$2" = pane ] && return 0
+  [ -f "$META" ] || return 0
+  local line fields
+  line=$("$SCRIPT_DIR/fm-limit-sense.sh" --no-pipeline "$ID" 2>/dev/null) || return 0
+  case "$line" in
+    "limit: dead") printf 'limit-dead' ;;
+    "limit: dead"*)
+      fields=${line#limit: dead}
+      printf 'limit-dead (%s)' "${fields#"$SEP"}"
+      ;;
+  esac
+}
+
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local line="state: $1${SEP}source: $2"
+  local line="state: $1${SEP}source: $2" limit
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  limit=$(limit_death_detail "$1" "$2")
+  [ -n "$limit" ] && line="$line${SEP}$limit"
   printf '%s\n' "$line"
   exit 0
 }

@@ -38,7 +38,13 @@
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#                          status, unless afk is active. A firing heartbeat's
+#                          payload carries " · limit-dead=<id>[,<id>]" when
+#                          bin/fm-limit-sense.sh reads a provider limit death
+#                          from a task's session transcript - a death appends no
+#                          status line and fires no turn-end hook, so no other
+#                          scan here can see it. Annotation only: it never
+#                          changes whether a heartbeat fires or is absorbed.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -532,6 +538,28 @@ mark_all_captain_relevant_surfaced() {
 # firstmate, this normally finds nothing and the heartbeat is absorbed; it
 # surfaces only a captain-relevant status the per-wake path absorbed by mistake -
 # the fail-safe backstop.
+# Heartbeat annotation for provider limit deaths. A limit death appends no
+# status line and fires no turn-end hook, so it is invisible to every scan
+# above; bin/fm-limit-sense.sh reads it from the session transcript instead.
+# This is ANNOTATION ONLY - it deliberately does not change whether a heartbeat
+# fires or is absorbed, so the surface a supervisor already trusts is unchanged
+# and only becomes more specific when it does fire. Runs only on a firing
+# heartbeat (never on the absorbed path) and always with --no-pipeline, so the
+# watcher never blocks on a no-mistakes subprocess. Echoes an empty string when
+# no task is limit-dead.
+heartbeat_limit_annotation() {
+  local meta id line ids=
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    line=$("$SCRIPT_DIR/fm-limit-sense.sh" --no-pipeline "$id" 2>/dev/null) || continue
+    case "$line" in
+      "limit: dead"*) ids="$ids${ids:+,}$id" ;;
+    esac
+  done
+  [ -n "$ids" ] && printf ' · limit-dead=%s' "$ids"
+}
+
 heartbeat_scan_finds_actionable() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
@@ -999,14 +1027,14 @@ EOF
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
     if afk_present; then
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      fm_wake_append heartbeat heartbeat "heartbeat$(heartbeat_limit_annotation)" || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
       # Enqueue first, then mark every captain-relevant status surfaced so the next
       # heartbeat does not re-fire them (enqueue-before-suppress preserved).
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      fm_wake_append heartbeat heartbeat "heartbeat$(heartbeat_limit_annotation)" || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced
       wake "heartbeat"
