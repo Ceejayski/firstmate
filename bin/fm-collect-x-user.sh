@@ -28,6 +28,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 API="${FM_X_API:-https://api.fxtwitter.com}"
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  sed -n '2,25p' "$0"
+  exit 0
+fi
+
 if [[ $# -lt 1 ]]; then
   sed -n '2,25p' "$0"
   exit 1
@@ -35,6 +40,11 @@ fi
 
 HANDLE="$(printf '%s' "${1#@}" | tr '[:upper:]' '[:lower:]')"
 shift
+
+if [[ ! "$HANDLE" =~ ^[a-z0-9_]{1,15}$ ]]; then
+  echo "invalid handle: $HANDLE (expected 1-15 chars of a-z, 0-9, _)" >&2
+  exit 1
+fi
 
 case "$HANDLE" in
   fizzychats)
@@ -116,25 +126,28 @@ ok=0
 fail=0
 for id in "${ids[@]}"; do
   out="$POSTS/${id}.json"
-  if ! curl -sL --max-time 25 "${API}/${HANDLE}/status/${id}" -o "$out"; then
+  tmp="$(mktemp "$POSTS/.${id}.XXXXXX")"
+  if ! curl -sL --max-time 25 "${API}/${HANDLE}/status/${id}" -o "$tmp"; then
     echo "fail fetch $id" >&2
+    rm -f "$tmp"
     fail=$((fail + 1))
     continue
   fi
-  code="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("code",0))' "$out" 2>/dev/null || echo 0)"
+  code="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("code",0))' "$tmp" 2>/dev/null || echo 0)"
   if [[ "$code" != "200" ]]; then
     echo "fail $id code=$code" >&2
-    rm -f "$out"
+    rm -f "$tmp"
     fail=$((fail + 1))
     continue
   fi
-  author="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tweet"]["author"]["screen_name"])' "$out" 2>/dev/null || echo '')"
+  author="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tweet"]["author"]["screen_name"])' "$tmp" 2>/dev/null || echo '')"
   if [[ "$(printf '%s' "$author" | tr '[:upper:]' '[:lower:]')" != "$HANDLE" ]]; then
     echo "skip $id author=$author (wanted $HANDLE)" >&2
-    rm -f "$out"
+    rm -f "$tmp"
     fail=$((fail + 1))
     continue
   fi
+  mv -f "$tmp" "$out"
   if [[ -f "$WATCH" ]] && ! grep -qE "^${id}$" "$WATCH" 2>/dev/null; then
     echo "$id" >>"$WATCH"
   elif [[ ! -f "$WATCH" ]]; then

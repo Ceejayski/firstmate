@@ -42,11 +42,32 @@ fi
 
 mkdir -p "$(dirname "${INBOX}")"
 
+# GNU date takes -d @SECONDS, BSD date takes -r SECONDS; probe a known epoch.
+DATE_EPOCH_MODE=""
+if [[ "$(date -u -d @0 +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" == "1970-01-01T00:00:00Z" ]]; then
+  DATE_EPOCH_MODE="gnu"
+elif [[ "$(date -u -r 0 +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" == "1970-01-01T00:00:00Z" ]]; then
+  DATE_EPOCH_MODE="bsd"
+fi
+
+epoch_to_iso() {
+  local epoch="$1" out=""
+  [[ "${epoch}" =~ ^[0-9]+$ ]] || { date -u +%Y-%m-%dT%H:%M:%SZ; return 0; }
+  case "${DATE_EPOCH_MODE}" in
+    gnu) out="$(date -u -d "@${epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" ;;
+    bsd) out="$(date -u -r "${epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" ;;
+  esac
+  if [[ -z "${out}" ]]; then
+    out="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fi
+  printf '%s' "${out}"
+}
+
 ingest_text() {
   local text="$1" msg_id="${2:-}" msg_date="${3:-}"
   local ts
-  if [[ -n "${msg_date}" && "${msg_date}" != "0" ]]; then
-    ts="$(date -u -r "${msg_date}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ "${msg_date}" =~ ^[0-9]+$ && "${msg_date}" != "0" ]]; then
+    ts="$(epoch_to_iso "${msg_date}")"
   else
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi

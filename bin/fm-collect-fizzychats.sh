@@ -92,17 +92,21 @@ ok=0
 fail=0
 for id in "${ids[@]}"; do
   out="$POSTS/${id}.json"
-  if ! curl -sL --max-time 25 "${API}/${HANDLE}/status/${id}" -o "$out"; then
+  tmp="$(mktemp "$POSTS/.${id}.XXXXXX")"
+  if ! curl -sL --max-time 25 "${API}/${HANDLE}/status/${id}" -o "$tmp"; then
     echo "fail fetch $id" >&2
+    rm -f "$tmp"
     fail=$((fail + 1))
     continue
   fi
-  code="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("code",0))' "$out" 2>/dev/null || echo 0)"
+  code="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("code",0))' "$tmp" 2>/dev/null || echo 0)"
   if [[ "$code" != "200" ]]; then
     echo "fail $id code=$code" >&2
+    rm -f "$tmp"
     fail=$((fail + 1))
     continue
   fi
+  mv -f "$tmp" "$out"
   # append to watch list if new
   if [[ -f "$WATCH" ]] && ! grep -qE "^${id}$" "$WATCH" 2>/dev/null; then
     echo "$id" >>"$WATCH"

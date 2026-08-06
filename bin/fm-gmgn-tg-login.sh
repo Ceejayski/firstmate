@@ -25,7 +25,7 @@ fi
 
 if [[ -n "${TMUX:-}" ]]; then
   TG_SESSION="$(tmux display-message -p '#S')"
-  if tmux list-windows -t "${TG_SESSION}" 2>/dev/null | grep -q 'fm-tg-login'; then
+  if tmux list-windows -t "${TG_SESSION}" -F '#W' 2>/dev/null | grep -qx 'fm-tg-login'; then
     tmux select-window -t "${TG_SESSION}:fm-tg-login"
     echo "Switched to existing fm-tg-login window — scan QR there or re-run tg login inside it."
     exit 0
