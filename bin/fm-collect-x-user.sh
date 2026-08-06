@@ -29,11 +29,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 API="${FM_X_API:-https://api.fxtwitter.com}"
 
 if [[ $# -lt 1 ]]; then
-  sed -n '2,10p' "$0"
+  sed -n '2,25p' "$0"
   exit 1
 fi
 
-HANDLE="${1#@}"
+HANDLE="$(printf '%s' "${1#@}" | tr '[:upper:]' '[:lower:]')"
 shift
 
 case "$HANDLE" in
@@ -76,11 +76,16 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     --help|-h)
-      sed -n '2,10p' "$0"
+      sed -n '2,25p' "$0"
       exit 0
       ;;
     *)
-      ids+=("$1")
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        ids+=("$1")
+      else
+        echo "not a status id: $1 (expected digits only, or use --url)" >&2
+        exit 1
+      fi
       ;;
   esac
   shift || true
@@ -116,15 +121,15 @@ for id in "${ids[@]}"; do
     fail=$((fail + 1))
     continue
   fi
-  code="$(python3 -c "import json;print(json.load(open('$out')).get('code',0))" 2>/dev/null || echo 0)"
+  code="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("code",0))' "$out" 2>/dev/null || echo 0)"
   if [[ "$code" != "200" ]]; then
     echo "fail $id code=$code" >&2
     rm -f "$out"
     fail=$((fail + 1))
     continue
   fi
-  author="$(python3 -c "import json;print(json.load(open('$out'))['tweet']['author']['screen_name'])" 2>/dev/null || echo '')"
-  if [[ "$author" != "$HANDLE" ]]; then
+  author="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tweet"]["author"]["screen_name"])' "$out" 2>/dev/null || echo '')"
+  if [[ "$(printf '%s' "$author" | tr '[:upper:]' '[:lower:]')" != "$HANDLE" ]]; then
     echo "skip $id author=$author (wanted $HANDLE)" >&2
     rm -f "$out"
     fail=$((fail + 1))
@@ -205,7 +210,14 @@ for p in sorted(posts_dir.glob("*.json")):
         }
     )
 index_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False) + "\n")
-watch_path.write_text("\n".join(r["id"] for r in rows) + ("\n" if rows else ""))
+existing = watch_path.read_text().splitlines() if watch_path.exists() else []
+known = {ln.split("#", 1)[0].strip() for ln in existing}
+merged = list(existing)
+for r in rows:
+    if r["id"] not in known:
+        merged.append(r["id"])
+        known.add(r["id"])
+watch_path.write_text("\n".join(merged) + ("\n" if merged else ""))
 print(f"index {len(rows)} posts, media files {len(list(media_dir.glob('*')))}")
 PY
 

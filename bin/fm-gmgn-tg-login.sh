@@ -24,14 +24,15 @@ if ! "${TG_BIN}" init 2>/dev/null; then
 fi
 
 if [[ -n "${TMUX:-}" ]]; then
-  if tmux list-windows -t "${TMUX%%:*}" 2>/dev/null | grep -q 'fm-tg-login'; then
-    tmux select-window -t "${TMUX%%:*}:fm-tg-login"
+  TG_SESSION="$(tmux display-message -p '#S')"
+  if tmux list-windows -t "${TG_SESSION}" 2>/dev/null | grep -q 'fm-tg-login'; then
+    tmux select-window -t "${TG_SESSION}:fm-tg-login"
     echo "Switched to existing fm-tg-login window — scan QR there or re-run tg login inside it."
     exit 0
   fi
-  tmux new-window -t "${TMUX%%:*}" -n fm-tg-login \
+  tmux new-window -t "${TG_SESSION}" -n fm-tg-login \
     "export PATH=\"${TG_DIR}:\$PATH\"; echo '=== Telegram login (gotd/cli) ==='; echo 'Phone: Telegram → Settings → Devices → Link Desktop Device'; echo; exec tg login"
-  tmux select-window -t "${TMUX%%:*}:fm-tg-login"
+  tmux select-window -t "${TG_SESSION}:fm-tg-login"
   echo "Opened fm-tg-login tmux window — switch there and scan the QR code."
 else
   echo "=== Telegram login (gotd/cli) ==="

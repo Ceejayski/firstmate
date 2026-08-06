@@ -42,11 +42,16 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     --help|-h)
-      sed -n '2,8p' "$0"
+      sed -n '2,17p' "$0"
       exit 0
       ;;
     *)
-      ids+=("$1")
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        ids+=("$1")
+      else
+        echo "not a status id: $1 (expected digits only, or use --url)" >&2
+        exit 1
+      fi
       ;;
   esac
   shift || true
@@ -92,7 +97,7 @@ for id in "${ids[@]}"; do
     fail=$((fail + 1))
     continue
   fi
-  code="$(python3 -c "import json;print(json.load(open('$out')).get('code',0))" 2>/dev/null || echo 0)"
+  code="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("code",0))' "$out" 2>/dev/null || echo 0)"
   if [[ "$code" != "200" ]]; then
     echo "fail $id code=$code" >&2
     fail=$((fail + 1))
@@ -100,6 +105,8 @@ for id in "${ids[@]}"; do
   fi
   # append to watch list if new
   if [[ -f "$WATCH" ]] && ! grep -qE "^${id}$" "$WATCH" 2>/dev/null; then
+    echo "$id" >>"$WATCH"
+  elif [[ ! -f "$WATCH" ]]; then
     echo "$id" >>"$WATCH"
   fi
   ok=$((ok + 1))
