@@ -122,6 +122,11 @@ while IFS= read -r _id; do
 done < <(printf '%s\n' "${ids[@]}" | awk '!a[$0]++')
 ids=("${_ids_deduped[@]}")
 
+tmp=""
+cleanup_tmp() { [[ -n "$tmp" ]] && rm -f "$tmp"; return 0; }
+trap cleanup_tmp EXIT
+trap 'cleanup_tmp; exit 130' INT TERM
+
 ok=0
 fail=0
 for id in "${ids[@]}"; do

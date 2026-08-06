@@ -88,6 +88,11 @@ if [[ ! -s "$DEST/profile/banner-1500x500.jpg" ]]; then
     'https://pbs.twimg.com/profile_banners/1952426104217886720/1768866859/1500x500' || true
 fi
 
+tmp=""
+cleanup_tmp() { [[ -n "$tmp" ]] && rm -f "$tmp"; return 0; }
+trap cleanup_tmp EXIT
+trap 'cleanup_tmp; exit 130' INT TERM
+
 ok=0
 fail=0
 for id in "${ids[@]}"; do
