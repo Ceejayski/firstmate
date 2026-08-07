@@ -46,9 +46,12 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
-# Ship Definition of done requires the one-line stdout of bin/fm-honest-done.sh
-# (branch-vs-target suite counts) in every terminal done: report so "done" is a
-# measurement, not a claim; the script header owns discovery and output format.
+# Ship Definition of done requires the one-line stdout of an uncontended
+# bin/fm-honest-done.sh --solo run (branch-vs-target suite counts, verdict, and
+# both SHAs) in every terminal done: report, so "done" is a measurement rather
+# than a claim and an unknown/UNVERIFIED/CONTENDED result is reported as such
+# instead of as green; that script's header owns discovery, the solo and
+# contention rules, and the output format.
 # Ship and scout scaffolds also include a Reasoning (Fable protocol) section
 # pointing the crewmate at data/fable-reasoning-protocol.md; secondmate
 # charters do not get this section.
