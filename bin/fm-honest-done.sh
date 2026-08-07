@@ -557,11 +557,17 @@ parse_suite_output() {
 run_suite_in_dir() {
   local work_dir=$1 cmd=$2 log_file=$3
   local rc=0
-  # Run through bash -lc so package.json scripts that assume a shell work, and
+  # Run through bash -c so package.json scripts that assume a shell work, and
   # so a bare `make test` / npm script is not subject to word-splitting surprises
   # beyond what the project already declared.
+  # Drop this tool's env from the child suite: if the suite itself invokes
+  # fm-honest-done (firstmate's contract tests), inherited SOLO/FORCE/ASSUME
+  # would poison nested verdicts and falsely red the branch under measure.
   (
     cd "$work_dir" || exit 127
+    unset FM_HONEST_DONE_SOLO FM_HONEST_DONE_FORCE_CONTENDED \
+      FM_HONEST_DONE_ASSUME_QUIET FM_HONEST_DONE_NO_CACHE \
+      FM_HONEST_DONE_ALLOW_PRIMARY
     # shellcheck disable=SC2086 # project-declared command string must expand as written
     bash -c "$cmd"
   ) >"$log_file" 2>&1 || rc=$?
