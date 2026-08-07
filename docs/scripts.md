@@ -97,3 +97,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-buzz-lib.sh`         | Shared Buzz fleet-bridge config resolution, snapshot composition, and send/fetch helpers |
 | `fm-buzz-status.sh`      | Post the public-safe fleet snapshot or custom text to the configured Buzz channel     |
 | `fm-buzz-enqueue.sh`     | Poll the configured Buzz channel for research requests and surface them once each     |
+| `fm-collect-x-user.sh`   | Collect a public X user's posts and media by status id into the study social pack     |
+| `fm-collect-fizzychats.sh` | Same collection for the `fizzychats` handle only; `fm-collect-x-user.sh` generalizes it |
+| `fm-gmgn-tg-login.sh`    | Start or reattach the interactive Telegram QR login the GMGN watcher depends on       |
+| `fm-gmgn-tg-watch.sh`    | Stream GMGN Pump Alert channel messages into the deck ingest pipeline or its fallback inbox |
