@@ -6,6 +6,7 @@
 #   - branch introduces a failure (BRANCH-INTRODUCED naming the test)
 #   - branch failure set matches target (BYTE-IDENTICAL), including inherited red
 #   - project with no discoverable test command (unknown, exit 0)
+#   - .no-mistakes.yaml commands.test discovery, with and without python3 yaml
 #   - git state (HEAD / branch / porcelain) unchanged after a run
 #   - primary checkout refused without FM_HONEST_DONE_ALLOW_PRIMARY, while
 #     --discover-only (read-only) still works there
@@ -263,6 +264,40 @@ MK
   pass "fm-honest-done.sh: discovers make test from Makefile"
 }
 
+# .no-mistakes.yaml commands.test is a declared source too, and it must resolve
+# identically whether or not python3 can import yaml (awk structural fallback).
+test_no_mistakes_yaml_discovery() {
+  local case_dir out rc nopy
+  case_dir=$(make_repo nm-yaml-disc)
+  rm -f "$case_dir/wt/package.json"
+  cat > "$case_dir/wt/.no-mistakes.yaml" <<'YML'
+commands:
+  lint: 'bin/lint.sh'
+  test: './run-suite.sh'
+YML
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -qm "declare suite in .no-mistakes.yaml" >/dev/null
+
+  out=$(run_honest "$case_dir/wt" --discover-only 2>&1); rc=$?
+  expect_code 0 "$rc" ".no-mistakes.yaml discovery exited non-zero: $out"
+  [ "$out" = "./run-suite.sh" ] || fail "expected './run-suite.sh' from commands.test, got: $out"
+
+  # Same answer without a usable python3 (structural awk fallback path).
+  nopy="$case_dir/nopy"
+  mkdir -p "$nopy"
+  printf '#!/bin/sh\nexit 1\n' > "$nopy/python3"
+  chmod +x "$nopy/python3"
+  out=$(PATH="$nopy:$PATH" run_honest "$case_dir/wt" --discover-only 2>&1); rc=$?
+  expect_code 0 "$rc" ".no-mistakes.yaml awk fallback exited non-zero: $out"
+  [ "$out" = "./run-suite.sh" ] || fail "awk fallback should match python parse, got: $out"
+
+  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
+  expect_code 0 "$rc" ".no-mistakes.yaml measurement failed: $out"
+  assert_contains "$out" "3 pass / 0 fail on branch" "nm-yaml branch counts wrong: $out"
+  assert_contains "$out" "failure set BYTE-IDENTICAL" "nm-yaml label wrong: $out"
+  pass "fm-honest-done.sh: discovers commands.test from .no-mistakes.yaml"
+}
+
 # CI workflow discovery: portable fm-test-run lanes without package.json/Makefile.
 # Uses a tiny fake fm-test-run.sh so the test does not invoke the real suite.
 test_ci_portable_lanes_discovery() {
@@ -361,5 +396,6 @@ test_refuses_primary_checkout
 test_discover_only_allowed_in_primary_checkout
 test_vitest_jest_summary_counts
 test_makefile_discovery
+test_no_mistakes_yaml_discovery
 test_ci_portable_lanes_discovery
 test_firstmate_repo_discovers_ci_not_unknown
