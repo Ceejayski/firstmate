@@ -407,7 +407,7 @@ The only `--effort` option in the binary belongs to the `qwen review` subcommand
 
 Entitlement is per model, not per provider.
 Against the same configured provider block, `deepseek-v4-pro` and `qwen3.7-plus` answered a probe, while `deepseek-v4-flash` returned `403 Access to model denied` and `qwen2.6-flash` returned `404 Model not exist`.
-Confirm each model id with `qwen -m <id> -p <probe>` before dispatching on it.
+Measuring current entitlement is now `bin/fm-model-probe.sh`; its header owns the contract and the harness-adapters skill owns the latest measurement.
 
 Autonomy.
 `--yolo` ran a crewmate that read files, wrote files, and executed shell commands with no permission gate; the pane footer read `YOLO mode`.
