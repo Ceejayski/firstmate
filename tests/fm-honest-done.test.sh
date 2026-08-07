@@ -7,7 +7,9 @@
 #   - branch failure set matches target (BYTE-IDENTICAL), including inherited red
 #   - project with no discoverable test command (unknown, exit 0)
 #   - git state (HEAD / branch / porcelain) unchanged after a run
-#   - primary checkout refused without FM_HONEST_DONE_ALLOW_PRIMARY
+#   - primary checkout refused without FM_HONEST_DONE_ALLOW_PRIMARY, while
+#     --discover-only (read-only) still works there
+#   - Vitest/Jest summary counts parse on BSD sed as well as GNU sed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -190,6 +192,59 @@ test_refuses_primary_checkout() {
   pass "fm-honest-done.sh: refuses primary checkout"
 }
 
+# Discovery reads project files only; CI (actions/checkout) is a primary
+# checkout, so --discover-only must work there without the escape hatch.
+test_discover_only_allowed_in_primary_checkout() {
+  local case_dir out rc
+  case_dir=$(make_repo primary-discover)
+  out=$(run_honest "$case_dir/project" --discover-only 2>&1); rc=$?
+  expect_code 0 "$rc" "--discover-only in primary checkout must exit 0, got $rc out=$out"
+  [ "$out" = "./run-suite.sh" ] || fail "expected discovered './run-suite.sh', got: $out"
+  pass "fm-honest-done.sh: --discover-only works in a primary checkout"
+}
+
+# Vitest / Jest summary counts must parse on BSD sed too (no GNU \b).
+test_vitest_jest_summary_counts() {
+  local case_dir out rc
+  case_dir=$(make_repo jest-summary)
+  cat > "$case_dir/wt/run-suite.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+ALL="alpha beta gamma"
+failed=0
+total=0
+for t in $ALL; do
+  total=$((total + 1))
+  if [ -f FAIL_TESTS ] && grep -Fxq "$t" FAIL_TESTS; then
+    printf 'FAIL suites/%s.test.js\n' "$t"
+    failed=$((failed + 1))
+  else
+    printf 'PASS suites/%s.test.js\n' "$t"
+  fi
+done
+printf 'Tests:       %s failed, %s passed, %s total\n' "$failed" "$((total - failed))" "$total"
+[ "$failed" -eq 0 ] || exit 1
+exit 0
+SH
+  chmod +x "$case_dir/wt/run-suite.sh"
+  git -C "$case_dir/wt" add run-suite.sh
+  git -C "$case_dir/wt" commit -qm "jest-style summary suite" >/dev/null
+  # Target carries the same runner, all green.
+  git -C "$case_dir/wt" push -q origin HEAD:main
+
+  printf 'gamma\n' > "$case_dir/wt/FAIL_TESTS"
+  git -C "$case_dir/wt" add FAIL_TESTS
+  git -C "$case_dir/wt" commit -qm "branch breaks gamma" >/dev/null
+
+  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "jest-summary measurement must exit 0 (got $rc, out=$out)"
+  assert_contains "$out" "2 pass / 1 fail on branch" "jest branch counts wrong: $out"
+  assert_contains "$out" "3 pass / 0 fail on target" "jest target counts wrong: $out"
+  assert_contains "$out" "BRANCH-INTRODUCED: suites/gamma.test.js" \
+    "jest failure name wrong: $out"
+  pass "fm-honest-done.sh: parses Vitest/Jest summary counts portably"
+}
+
 test_makefile_discovery() {
   local case_dir out rc
   case_dir=$(make_repo makefile-disc)
@@ -303,6 +358,8 @@ test_branch_introduced_names_failure
 test_byte_identical_including_inherited_red
 test_git_state_untouched
 test_refuses_primary_checkout
+test_discover_only_allowed_in_primary_checkout
+test_vitest_jest_summary_counts
 test_makefile_discovery
 test_ci_portable_lanes_discovery
 test_firstmate_repo_discovers_ci_not_unknown

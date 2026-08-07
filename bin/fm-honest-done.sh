@@ -34,8 +34,9 @@
 #        not suite measurement commands and are skipped
 #
 # Safety:
-#   - Refuses a primary checkout (git-dir == common-dir) unless
-#     FM_HONEST_DONE_ALLOW_PRIMARY=1 (test harness only).
+#   - Refuses a primary checkout (git-dir == common-dir) for measurement runs
+#     unless FM_HONEST_DONE_ALLOW_PRIMARY=1 (test harness only). --discover-only
+#     is exempt: it reads project files and never runs a suite or touches git.
 #   - Never merges, pushes, or checks out either branch in place.
 #   - Target runs use a temporary detached worktree that is removed before exit.
 #   - Caller's HEAD, branch tip, and working tree (status --porcelain) are
@@ -138,7 +139,7 @@ is_primary_checkout() {
   [ "$gd" = "$cd_path" ]
 }
 
-if is_primary_checkout "$DIR"; then
+if [ "$DISCOVER_ONLY" -eq 0 ] && is_primary_checkout "$DIR"; then
   if [ "${FM_HONEST_DONE_ALLOW_PRIMARY:-}" != 1 ]; then
     die "refusing primary checkout (not a linked worktree): $DIR"
   fi
@@ -397,6 +398,22 @@ sys.exit(1)
 PY
 }
 
+# Pull "<N> <word>" out of a Vitest/Jest summary line, e.g. `1 failed` from
+# "Tests:  1 failed, 5 passed, 6 total". Uses character-class boundaries only:
+# GNU `\b` is unsupported by BSD sed and would silently extract nothing there.
+extract_summary_count() {
+  local line=$1 word=$2 n
+  n=$(printf '%s' "$line" \
+    | sed -nE "s/.*[^0-9]([0-9]+)[[:space:]]+${word}([^[:alnum:]_].*)?\$/\1/p" \
+    | head -1)
+  if [ -z "$n" ]; then
+    n=$(printf '%s' "$line" \
+      | sed -nE "s/^([0-9]+)[[:space:]]+${word}([^[:alnum:]_].*)?\$/\1/p" \
+      | head -1)
+  fi
+  printf '%s' "$n"
+}
+
 # Parse suite output into pass count, fail count, and a sorted unique failure
 # name list (one name per line on fd 3 via a temp files protocol).
 # Writes: $1.pass $1.fail $1.names (sorted unique failure names)
@@ -483,8 +500,8 @@ parse_suite_output() {
     local summary
     summary=$(grep -Ei 'Tests?[[:space:]]+[0-9].*passed|Tests:.*passed|Test Suites:' "$log_file" | tail -1 || true)
     # Extract "N failed" and "N passed" if present.
-    fail=$(printf '%s' "$summary" | sed -nE 's/.*\b([0-9]+)[[:space:]]+failed\b.*/\1/p' | head -1)
-    pass=$(printf '%s' "$summary" | sed -nE 's/.*\b([0-9]+)[[:space:]]+passed\b.*/\1/p' | head -1)
+    fail=$(extract_summary_count "$summary" failed)
+    pass=$(extract_summary_count "$summary" passed)
     fail=${fail:-0}
     pass=${pass:-0}
     # Vitest failure names: lines with leading FAIL or × / x
@@ -657,7 +674,7 @@ fi
 # (including when the sorted sets are equal). BRANCH-INTRODUCED lists names
 # present on the branch but not on the target. Counts always come from both
 # runs so an inherited red and a new red stay distinguishable.
-INTRODUCED=$(comm -13 "$TARGET_PREFIX.names" "$BRANCH_NAMES" || true)
+INTRODUCED=$(LC_ALL=C comm -13 "$TARGET_PREFIX.names" "$BRANCH_NAMES" || true)
 if [ -n "$INTRODUCED" ]; then
   names_joined=$(
     printf '%s\n' "$INTRODUCED" \
