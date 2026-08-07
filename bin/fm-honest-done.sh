@@ -406,27 +406,10 @@ parse_suite_output() {
 
   : >"$out_prefix.names"
 
-  # Prefer TAP: ok / not ok lines.
-  if grep -Eq '^not ok |^ok ' "$log_file" 2>/dev/null; then
-    pass=$(grep -cE '^ok ' "$log_file" 2>/dev/null || true)
-    fail=$(grep -cE '^not ok ' "$log_file" 2>/dev/null || true)
-    # names: "not ok N - name" or "not ok N name"
-    grep -E '^not ok ' "$log_file" 2>/dev/null \
-      | sed -E 's/^not ok [0-9]+[[:space:]]*(-[[:space:]]*)?//' \
-      | sed -E 's/[[:space:]]*#.*$//' \
-      | sed -E 's/[[:space:]]+$//' \
-      | awk 'NF { print }' \
-      | LC_ALL=C sort -u >"$out_prefix.names" || true
-    # Bail out of summary-only path once TAP counted something.
-    if [ "$((pass + fail))" -gt 0 ]; then
-      printf '%s\n' "$pass" >"$out_prefix.pass"
-      printf '%s\n' "$fail" >"$out_prefix.fail"
-      return 0
-    fi
-  fi
-
-  # Firstmate suite runner markers. Sum every FM_TEST_SUMMARY so multi-lane
-  # CI compositions (portable-parallel-1 + 2 + serial) count as one suite.
+  # Firstmate suite runner markers take priority over inner TAP from each
+  # tests/*.test.sh (those scripts print many `ok -` lines that would inflate
+  # pass counts if counted as the suite). Sum every FM_TEST_SUMMARY so
+  # multi-lane CI compositions (portable-parallel-1 + 2 + serial) count as one.
   if grep -Eq '^FM_TEST_SUMMARY total=' "$log_file" 2>/dev/null; then
     local total failed
     total=0
@@ -456,6 +439,24 @@ parse_suite_output() {
     printf '%s\n' "$pass" >"$out_prefix.pass"
     printf '%s\n' "$fail" >"$out_prefix.fail"
     return 0
+  fi
+
+  # Prefer TAP: ok / not ok lines (standalone TAP suites without FM_TEST_*).
+  if grep -Eq '^not ok |^ok ' "$log_file" 2>/dev/null; then
+    pass=$(grep -cE '^ok ' "$log_file" 2>/dev/null || true)
+    fail=$(grep -cE '^not ok ' "$log_file" 2>/dev/null || true)
+    # names: "not ok N - name" or "not ok N name"
+    grep -E '^not ok ' "$log_file" 2>/dev/null \
+      | sed -E 's/^not ok [0-9]+[[:space:]]*(-[[:space:]]*)?//' \
+      | sed -E 's/[[:space:]]*#.*$//' \
+      | sed -E 's/[[:space:]]+$//' \
+      | awk 'NF { print }' \
+      | LC_ALL=C sort -u >"$out_prefix.names" || true
+    if [ "$((pass + fail))" -gt 0 ]; then
+      printf '%s\n' "$pass" >"$out_prefix.pass"
+      printf '%s\n' "$fail" >"$out_prefix.fail"
+      return 0
+    fi
   fi
 
   # node --test TAP-ish footer: # tests N / # pass N / # fail N
