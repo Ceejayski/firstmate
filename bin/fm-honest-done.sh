@@ -670,6 +670,17 @@ suite_contention_detected() {
 
 CACHE_ROOT="${TMPDIR:-/tmp}/fm-honest-done-cache"
 
+# Permission bits in octal. BSD and GNU stat spell this differently and neither
+# rejects the other's flag cleanly (GNU -f is --file-system), so branch on the
+# platform the way bin/fm-pr-lib.sh and bin/fm-lock-lib.sh do.
+path_mode_octal() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
 # True when CACHE_ROOT is a private, caller-owned directory (mode 0700, not a
 # symlink). In a world-writable /tmp another user could otherwise pre-create the
 # predictable cache path and dictate the target-side counts this tool reports.
@@ -683,7 +694,7 @@ cache_root_ready() {
   fi
   [ -d "$CACHE_ROOT" ] || return 1
   [ -O "$CACHE_ROOT" ] || return 1
-  mode=$(stat -f '%Lp' "$CACHE_ROOT" 2>/dev/null || stat -c '%a' "$CACHE_ROOT" 2>/dev/null) || mode=
+  mode=$(path_mode_octal "$CACHE_ROOT") || mode=
   case "$mode" in
     ''|*[!0-7]*) return 1 ;;
   esac
