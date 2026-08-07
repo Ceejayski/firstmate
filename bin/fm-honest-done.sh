@@ -1,0 +1,516 @@
+#!/usr/bin/env bash
+# fm-honest-done.sh - emit one comparable suite-count line for a ship done-report.
+#
+# Runs the project's discovered test command on the current branch HEAD and on
+# the merge target, compares failure name sets, and prints exactly one line:
+#
+#   <N> pass / <M> fail on branch; <P> pass / <Q> fail on target; failure set <BYTE-IDENTICAL|BRANCH-INTRODUCED: <names>>
+#
+# or, when no test command can be discovered without guessing:
+#
+#   unknown
+#
+# Usage:
+#   fm-honest-done.sh [--dir <path>] [--target <ref>]
+#   fm-honest-done.sh -h | --help
+#
+# Options:
+#   --dir <path>     project worktree to measure (default: cwd)
+#   --target <ref>   merge-target ref (default: origin/<default-branch> if that
+#                    ref exists, else <default-branch>)
+#   -h, --help       print this header
+#
+# Discovery (first match wins; never invent a command):
+#   1. package.json scripts.test (non-empty string)
+#   2. Makefile or makefile target named exactly `test`
+#   3. .no-mistakes.yaml or .no-mistakes.yml commands.test (non-empty string)
+#
+# Safety:
+#   - Refuses a primary checkout (git-dir == common-dir) unless
+#     FM_HONEST_DONE_ALLOW_PRIMARY=1 (test harness only).
+#   - Never merges, pushes, or checks out either branch in place.
+#   - Target runs use a temporary detached worktree that is removed before exit.
+#   - Caller's HEAD, branch tip, and working tree (status --porcelain) are
+#     snapshotted and must match after the run.
+#   - Does not decide merge eligibility; it only reports.
+#   - Does not treat missing CI / "no checks configured" as a pass.
+#
+# Cache:
+#   Target results may be reused under ${TMPDIR:-/tmp}/fm-honest-done-cache/
+#   keyed by exact target commit SHA + test command. A commit is immutable, so
+#   that key cannot go stale into a wrong verdict. Branch (HEAD) is always run
+#   fresh. Set FM_HONEST_DONE_NO_CACHE=1 to force a double run.
+#
+# Exit status:
+#   0  measured line or `unknown` printed
+#   2  usage / environment error (not a git worktree, primary refused, etc.)
+set -eu
+
+usage() {
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0" >&2
+}
+
+die() {
+  printf 'fm-honest-done: %s\n' "$*" >&2
+  exit 2
+}
+
+DIR=
+TARGET_REF=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --dir)
+      [ "$#" -gt 1 ] || die "--dir requires a path"
+      DIR=$2
+      shift 2
+      ;;
+    --dir=*)
+      DIR=${1#--dir=}
+      shift
+      ;;
+    --target)
+      [ "$#" -gt 1 ] || die "--target requires a ref"
+      TARGET_REF=$2
+      shift 2
+      ;;
+    --target=*)
+      TARGET_REF=${1#--target=}
+      shift
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      die "unexpected argument: $1 (use --dir <path>)"
+      ;;
+  esac
+done
+
+if [ -z "$DIR" ]; then
+  DIR=$(pwd -P)
+else
+  DIR=$(cd "$DIR" && pwd -P) || die "cannot cd to --dir path"
+fi
+
+git -C "$DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || die "not a git worktree: $DIR"
+
+# Primary checkout = main working tree (git-dir resolves to the same place as
+# common-dir). Linked worktrees (crewmate shape) have a distinct git-dir under
+# .git/worktrees/<name>.
+is_primary_checkout() {
+  local root=$1 gd cd_path
+  gd=$(git -C "$root" rev-parse --git-dir)
+  cd_path=$(git -C "$root" rev-parse --git-common-dir)
+  case "$gd" in
+    /*) ;;
+    *) gd=$(cd "$root" && cd "$gd" && pwd -P) ;;
+  esac
+  case "$cd_path" in
+    /*) ;;
+    *) cd_path=$(cd "$root" && cd "$cd_path" && pwd -P) ;;
+  esac
+  # Also normalize absolute paths that may still be relative-looking after
+  # rev-parse on some git versions.
+  gd=$(cd "$gd" 2>/dev/null && pwd -P || printf '%s' "$gd")
+  cd_path=$(cd "$cd_path" 2>/dev/null && pwd -P || printf '%s' "$cd_path")
+  [ "$gd" = "$cd_path" ]
+}
+
+if is_primary_checkout "$DIR"; then
+  if [ "${FM_HONEST_DONE_ALLOW_PRIMARY:-}" != 1 ]; then
+    die "refusing primary checkout (not a linked worktree): $DIR"
+  fi
+fi
+
+default_branch() {
+  local root=$1 ref branch
+  ref=$(git -C "$root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    printf '%s\n' "${ref#origin/}"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+    if git -C "$root" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_target_ref() {
+  local root=$1 explicit=$2 def
+  if [ -n "$explicit" ]; then
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+  def=$(default_branch "$root") || die "cannot determine default branch for $root"
+  if git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$def^{commit}" >/dev/null; then
+    printf 'origin/%s\n' "$def"
+    return 0
+  fi
+  if git -C "$root" rev-parse --verify --quiet "refs/heads/$def^{commit}" >/dev/null; then
+    printf '%s\n' "$def"
+    return 0
+  fi
+  die "cannot resolve merge target for default branch $def"
+}
+
+# Discover a project-declared test command. Never invent one.
+discover_test_command() {
+  local root=$1 cmd
+
+  if [ -f "$root/package.json" ] && command -v python3 >/dev/null 2>&1; then
+    cmd=$(
+      python3 - "$root/package.json" <<'PY'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+scripts = doc.get("scripts") if isinstance(doc, dict) else None
+if not isinstance(scripts, dict):
+    sys.exit(0)
+val = scripts.get("test")
+if isinstance(val, str):
+    val = val.strip()
+    if val:
+        print(val)
+PY
+    ) || true
+    if [ -n "${cmd:-}" ]; then
+      printf '%s\n' "$cmd"
+      return 0
+    fi
+  fi
+
+  if [ -f "$root/Makefile" ] || [ -f "$root/makefile" ]; then
+    local mf=
+    [ -f "$root/Makefile" ] && mf="$root/Makefile"
+    [ -z "$mf" ] && [ -f "$root/makefile" ] && mf="$root/makefile"
+    # Exact target `test` (optional deps after colon). Ignore .PHONY and comments.
+    if awk '
+      /^[[:space:]]*#/ { next }
+      /^test:([[:space:]]|$)/ { found=1; exit }
+      END { exit found ? 0 : 1 }
+    ' "$mf"; then
+      printf 'make test\n'
+      return 0
+    fi
+  fi
+
+  for nm in "$root/.no-mistakes.yaml" "$root/.no-mistakes.yml"; do
+    [ -f "$nm" ] || continue
+    cmd=$(
+      if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
+        python3 - "$nm" <<'PY'
+import sys
+try:
+    import yaml
+except Exception:
+    sys.exit(0)
+doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+cmds = doc.get("commands") if isinstance(doc, dict) else None
+val = cmds.get("test") if isinstance(cmds, dict) else None
+if isinstance(val, str):
+    val = val.strip()
+    if val:
+        print(val)
+PY
+      else
+        # Structural fallback: commands.test string under the commands block.
+        awk '
+          /^commands:[[:space:]]*$/ { in_cmds=1; next }
+          in_cmds && /^[^[:space:]#]/ { in_cmds=0 }
+          in_cmds && /^[[:space:]]+test:[[:space:]]*/ {
+            sub(/^[[:space:]]+test:[[:space:]]*/, "")
+            gsub(/^['\''"]|['\''"]$/, "")
+            if ($0 != "" && $0 != "~" && $0 != "null") print
+            exit
+          }
+        ' "$nm"
+      fi
+    ) || true
+    if [ -n "${cmd:-}" ]; then
+      printf '%s\n' "$cmd"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# Parse suite output into pass count, fail count, and a sorted unique failure
+# name list (one name per line on fd 3 via a temp files protocol).
+# Writes: $1.pass $1.fail $1.names (sorted unique failure names)
+parse_suite_output() {
+  local out_prefix=$1 log_file=$2 exit_code=$3
+  local pass=0 fail=0
+
+  : >"$out_prefix.names"
+
+  # Prefer TAP: ok / not ok lines.
+  if grep -Eq '^not ok |^ok ' "$log_file" 2>/dev/null; then
+    pass=$(grep -cE '^ok ' "$log_file" 2>/dev/null || true)
+    fail=$(grep -cE '^not ok ' "$log_file" 2>/dev/null || true)
+    # names: "not ok N - name" or "not ok N name"
+    grep -E '^not ok ' "$log_file" 2>/dev/null \
+      | sed -E 's/^not ok [0-9]+[[:space:]]*(-[[:space:]]*)?//' \
+      | sed -E 's/[[:space:]]*#.*$//' \
+      | sed -E 's/[[:space:]]+$//' \
+      | awk 'NF { print }' \
+      | LC_ALL=C sort -u >"$out_prefix.names" || true
+    # Bail out of summary-only path once TAP counted something.
+    if [ "$((pass + fail))" -gt 0 ]; then
+      printf '%s\n' "$pass" >"$out_prefix.pass"
+      printf '%s\n' "$fail" >"$out_prefix.fail"
+      return 0
+    fi
+  fi
+
+  # Firstmate suite runner markers.
+  if grep -Eq '^FM_TEST_SUMMARY total=' "$log_file" 2>/dev/null; then
+    local line total failed
+    line=$(grep -E '^FM_TEST_SUMMARY total=' "$log_file" | tail -1)
+    total=$(printf '%s' "$line" | sed -n 's/.*total=\([0-9][0-9]*\).*/\1/p')
+    failed=$(printf '%s' "$line" | sed -n 's/.*failed=\([0-9][0-9]*\).*/\1/p')
+    total=${total:-0}
+    failed=${failed:-0}
+    pass=$((total - failed))
+    [ "$pass" -ge 0 ] || pass=0
+    fail=$failed
+    grep -E '^FM_TEST_END ' "$log_file" 2>/dev/null \
+      | awk '/exit=[1-9]/ {
+          for (i = 1; i <= NF; i++) {
+            if ($i !~ /^(FM_TEST_END|exit=|duration_ms=|gate_skip=)/ && $i !~ /^[0-9]{4}-/) {
+              print $i
+              break
+            }
+          }
+        }' \
+      | LC_ALL=C sort -u >"$out_prefix.names" || true
+    printf '%s\n' "$pass" >"$out_prefix.pass"
+    printf '%s\n' "$fail" >"$out_prefix.fail"
+    return 0
+  fi
+
+  # node --test TAP-ish footer: # tests N / # pass N / # fail N
+  if grep -Eq '^# (tests|pass|fail|failed) ' "$log_file" 2>/dev/null; then
+    pass=$(grep -E '^# pass ' "$log_file" | tail -1 | awk '{print $3}' || true)
+    fail=$(grep -E '^# fail(ed)? ' "$log_file" | tail -1 | awk '{print $3}' || true)
+    pass=${pass:-0}
+    fail=${fail:-0}
+    grep -E '^not ok ' "$log_file" 2>/dev/null \
+      | sed -E 's/^not ok [0-9]+[[:space:]]*(-[[:space:]]*)?//' \
+      | sed -E 's/[[:space:]]*#.*$//' \
+      | awk 'NF { print }' \
+      | LC_ALL=C sort -u >"$out_prefix.names" || true
+    printf '%s\n' "$pass" >"$out_prefix.pass"
+    printf '%s\n' "$fail" >"$out_prefix.fail"
+    return 0
+  fi
+
+  # Vitest / Jest summary lines.
+  #   Tests  1 failed | 3 passed (4)
+  #   Test Suites: 1 failed, 2 passed, 3 total
+  #   Tests:       1 failed, 5 passed, 6 total
+  if grep -Eqi 'Tests?[[:space:]]+[0-9].*passed|Test Suites:|Tests:' "$log_file" 2>/dev/null; then
+    local summary
+    summary=$(grep -Ei 'Tests?[[:space:]]+[0-9].*passed|Tests:.*passed|Test Suites:' "$log_file" | tail -1 || true)
+    # Extract "N failed" and "N passed" if present.
+    fail=$(printf '%s' "$summary" | sed -nE 's/.*\b([0-9]+)[[:space:]]+failed\b.*/\1/p' | head -1)
+    pass=$(printf '%s' "$summary" | sed -nE 's/.*\b([0-9]+)[[:space:]]+passed\b.*/\1/p' | head -1)
+    fail=${fail:-0}
+    pass=${pass:-0}
+    # Vitest failure names: lines with leading FAIL or × / x
+    {
+      grep -E '^[[:space:]]*(FAIL|×|x)[[:space:]]+' "$log_file" 2>/dev/null || true
+      grep -E '^[[:space:]]*● ' "$log_file" 2>/dev/null || true
+    } | sed -E 's/^[[:space:]]*(FAIL|×|x|●)[[:space:]]+//' \
+      | sed -E 's/[[:space:]]+$//' \
+      | awk 'NF { print }' \
+      | LC_ALL=C sort -u >"$out_prefix.names" || true
+    printf '%s\n' "$pass" >"$out_prefix.pass"
+    printf '%s\n' "$fail" >"$out_prefix.fail"
+    return 0
+  fi
+
+  # Unparsed: honest fall-back from exit status only.
+  if [ "$exit_code" -eq 0 ]; then
+    pass=1
+    fail=0
+  else
+    pass=0
+    fail=1
+    printf 'unparsed-suite-failure\n' >"$out_prefix.names"
+  fi
+  printf '%s\n' "$pass" >"$out_prefix.pass"
+  printf '%s\n' "$fail" >"$out_prefix.fail"
+}
+
+run_suite_in_dir() {
+  local work_dir=$1 cmd=$2 log_file=$3
+  local rc=0
+  # Run through bash -lc so package.json scripts that assume a shell work, and
+  # so a bare `make test` / npm script is not subject to word-splitting surprises
+  # beyond what the project already declared.
+  (
+    cd "$work_dir" || exit 127
+    # shellcheck disable=SC2086 # project-declared command string must expand as written
+    bash -c "$cmd"
+  ) >"$log_file" 2>&1 || rc=$?
+  printf '%s\n' "$rc"
+}
+
+# Git state the script must not change on the caller's worktree.
+fingerprint_caller() {
+  local root=$1
+  {
+    git -C "$root" rev-parse HEAD 2>/dev/null || echo 'NOHEAD'
+    git -C "$root" symbolic-ref -q HEAD 2>/dev/null || echo 'DETACHED'
+    git -C "$root" status --porcelain=v1
+  }
+}
+
+sha256_text() {
+  local s=$1
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$s" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$s" | sha256sum | awk '{print $1}'
+  else
+    # Fallback: not cryptographic, only used as a cache key component.
+    printf '%s' "$s" | cksum | awk '{print $1}'
+  fi
+}
+
+CACHE_ROOT="${TMPDIR:-/tmp}/fm-honest-done-cache"
+TARGET_WT=
+TARGET_WT_ADDED=0
+WORK=
+# shellcheck disable=SC2329 # Registered via trap EXIT below.
+cleanup() {
+  if [ "$TARGET_WT_ADDED" -eq 1 ] && [ -n "$TARGET_WT" ]; then
+    git -C "$DIR" worktree remove --force "$TARGET_WT" >/dev/null 2>&1 || rm -rf "$TARGET_WT"
+  fi
+  if [ -n "${WORK:-}" ] && [ -d "${WORK:-}" ]; then
+    rm -rf "$WORK"
+  fi
+}
+trap cleanup EXIT
+
+TEST_CMD=
+if ! TEST_CMD=$(discover_test_command "$DIR"); then
+  printf 'unknown\n'
+  exit 0
+fi
+
+if [ -z "$TARGET_REF" ]; then
+  TARGET_REF=$(resolve_target_ref "$DIR" "")
+else
+  TARGET_REF=$(resolve_target_ref "$DIR" "$TARGET_REF")
+fi
+
+TARGET_SHA=$(git -C "$DIR" rev-parse --verify "${TARGET_REF}^{commit}") \
+  || die "cannot resolve target ref: $TARGET_REF"
+# Branch is always the worktree HEAD; no separate SHA var needed beyond the run.
+
+BEFORE_FP=$(fingerprint_caller "$DIR")
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-honest-done.XXXXXX")
+BRANCH_LOG="$WORK/branch.log"
+TARGET_LOG="$WORK/target.log"
+BRANCH_PREFIX="$WORK/branch"
+TARGET_PREFIX="$WORK/target"
+
+# --- branch (always fresh, in place) ---
+branch_rc=$(run_suite_in_dir "$DIR" "$TEST_CMD" "$BRANCH_LOG")
+parse_suite_output "$BRANCH_PREFIX" "$BRANCH_LOG" "$branch_rc"
+BRANCH_PASS=$(cat "$BRANCH_PREFIX.pass")
+BRANCH_FAIL=$(cat "$BRANCH_PREFIX.fail")
+BRANCH_NAMES="$BRANCH_PREFIX.names"
+
+# --- target (temp detached worktree; optional SHA+cmd cache) ---
+cmd_hash=$(sha256_text "$TEST_CMD")
+cache_dir="$CACHE_ROOT/$TARGET_SHA"
+cache_file="$cache_dir/$cmd_hash.result"
+cache_names="$cache_dir/$cmd_hash.names"
+use_cache=0
+if [ "${FM_HONEST_DONE_NO_CACHE:-}" != 1 ] && [ -f "$cache_file" ] && [ -f "$cache_names" ]; then
+  # Cache format: pass<TAB>fail on line 1.
+  if IFS=$(printf '\t') read -r TARGET_PASS TARGET_FAIL <"$cache_file"; then
+    case "$TARGET_PASS$TARGET_FAIL" in
+      ''|*[!0-9]*) use_cache=0 ;;
+      *)
+        use_cache=1
+        cp "$cache_names" "$TARGET_PREFIX.names"
+        printf '%s\n' "$TARGET_PASS" >"$TARGET_PREFIX.pass"
+        printf '%s\n' "$TARGET_FAIL" >"$TARGET_PREFIX.fail"
+        ;;
+    esac
+  fi
+fi
+
+if [ "$use_cache" -eq 0 ]; then
+  TARGET_WT=$(mktemp -d "${TMPDIR:-/tmp}/fm-honest-done-target.XXXXXX")
+  # worktree add requires the path to not exist as a non-empty dir on some
+  # gits; mktemp created it empty - remove so add can create it.
+  rmdir "$TARGET_WT"
+  git -C "$DIR" worktree add --detach "$TARGET_WT" "$TARGET_SHA" >/dev/null 2>&1 \
+    || die "failed to add temporary worktree for target $TARGET_SHA"
+  TARGET_WT_ADDED=1
+
+  target_rc=$(run_suite_in_dir "$TARGET_WT" "$TEST_CMD" "$TARGET_LOG")
+  parse_suite_output "$TARGET_PREFIX" "$TARGET_LOG" "$target_rc"
+  TARGET_PASS=$(cat "$TARGET_PREFIX.pass")
+  TARGET_FAIL=$(cat "$TARGET_PREFIX.fail")
+
+  mkdir -p "$cache_dir"
+  printf '%s\t%s\n' "$TARGET_PASS" "$TARGET_FAIL" >"$cache_file"
+  cp "$TARGET_PREFIX.names" "$cache_names"
+
+  git -C "$DIR" worktree remove --force "$TARGET_WT" >/dev/null 2>&1 || rm -rf "$TARGET_WT"
+  TARGET_WT_ADDED=0
+  TARGET_WT=
+else
+  TARGET_PASS=$(cat "$TARGET_PREFIX.pass")
+  TARGET_FAIL=$(cat "$TARGET_PREFIX.fail")
+fi
+
+AFTER_FP=$(fingerprint_caller "$DIR")
+if [ "$BEFORE_FP" != "$AFTER_FP" ]; then
+  die "git state changed during measurement (HEAD/branch/status must be untouched)"
+fi
+
+# Failure-set compare.
+# BYTE-IDENTICAL when the branch introduces no failure names absent on target
+# (including when the sorted sets are equal). BRANCH-INTRODUCED lists names
+# present on the branch but not on the target. Counts always come from both
+# runs so an inherited red and a new red stay distinguishable.
+INTRODUCED=$(comm -13 "$TARGET_PREFIX.names" "$BRANCH_NAMES" || true)
+if [ -n "$INTRODUCED" ]; then
+  names_joined=$(
+    printf '%s\n' "$INTRODUCED" \
+      | awk 'BEGIN { ORS = "" } { if (NR > 1) printf ", "; printf "%s", $0 } END { print "" }'
+  )
+  SET_LABEL="BRANCH-INTRODUCED: $names_joined"
+else
+  SET_LABEL='BYTE-IDENTICAL'
+fi
+
+printf '%s pass / %s fail on branch; %s pass / %s fail on target; failure set %s\n' \
+  "$BRANCH_PASS" "$BRANCH_FAIL" "$TARGET_PASS" "$TARGET_FAIL" "$SET_LABEL"
+exit 0

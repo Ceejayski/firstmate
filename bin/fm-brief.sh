@@ -46,6 +46,9 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship Definition of done requires the one-line stdout of bin/fm-honest-done.sh
+# (branch-vs-target suite counts) in every terminal done: report so "done" is a
+# measurement, not a claim; the script header owns discovery and output format.
 # Ship and scout scaffolds also include a Reasoning (Fable protocol) section
 # pointing the crewmate at data/fable-reasoning-protocol.md; secondmate
 # charters do not get this section.
@@ -312,6 +315,9 @@ case "$MODE" in
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Every terminal \`done:\` line must include the exact one-line stdout of \`$FM_ROOT/bin/fm-honest-done.sh\` run from this worktree (for example \`done: PR {url}; 12 pass / 0 fail on branch; 12 pass / 0 fail on target; failure set BYTE-IDENTICAL\`).
+Do not invent pass/fail counts; if that command prints \`unknown\`, say so plainly rather than claiming a green suite.
+"No CI configured" is not a pass.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -324,6 +330,9 @@ This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+Every terminal \`done:\` line must include the exact one-line stdout of \`$FM_ROOT/bin/fm-honest-done.sh\` run from this worktree (for example \`done: ready in branch fm/$ID; 12 pass / 0 fail on branch; 12 pass / 0 fail on target; failure set BYTE-IDENTICAL\`).
+Do not invent pass/fail counts; if that command prints \`unknown\`, say so plainly rather than claiming a green suite.
+"No CI configured" is not a pass.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -335,6 +344,9 @@ EOF
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+Every terminal \`done:\` line must include the exact one-line stdout of \`$FM_ROOT/bin/fm-honest-done.sh\` run from this worktree (for example \`done: committed; 12 pass / 0 fail on branch; 12 pass / 0 fail on target; failure set BYTE-IDENTICAL\`).
+Do not invent pass/fail counts; if that command prints \`unknown\`, say so plainly rather than claiming a green suite.
+"No CI configured" is not a pass.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
@@ -348,6 +360,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - Avoid \`--yes\`: it would silently bypass $FIRSTMATE_POSSESSIVE authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+That final \`done:\` line must also include the exact one-line stdout of \`$FM_ROOT/bin/fm-honest-done.sh\` from this worktree.
 EOF
     ;;
 esac
