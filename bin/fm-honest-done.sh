@@ -598,6 +598,12 @@ suite_contention_detected() {
   if [ "${FM_HONEST_DONE_FORCE_CONTENDED:-}" = 1 ]; then
     return 0
   fi
+  # Fixture tests set this so ambient leftover daemons from earlier suite
+  # scripts cannot turn BYTE-IDENTICAL cases into CONTENDED. Production
+  # --solo never sets it; the process scan remains the real guard.
+  if [ "${FM_HONEST_DONE_ASSUME_QUIET:-}" = 1 ]; then
+    return 1
+  fi
   self_pgid=$(ps -o pgid= -p "$self_pid" 2>/dev/null | tr -d ' ')
   [ -n "$self_pgid" ] || self_pgid=$self_pid
 

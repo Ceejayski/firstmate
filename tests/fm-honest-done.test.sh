@@ -94,10 +94,13 @@ run_honest() {
 }
 
 # Solo measurement helper: asserts exclusive suite access for a real verdict.
+# ASSUME_QUIET keeps fixture verdicts stable when earlier suite scripts left
+# ambient processes; production ship measures never set that variable.
 run_honest_solo() {
   local wt=$1
   shift
-  "$HONEST" --solo --dir "$wt" "$@"
+  FM_HONEST_DONE_ASSUME_QUIET=1 \
+    "$HONEST" --solo --dir "$wt" "$@"
 }
 
 test_help_and_executable() {
