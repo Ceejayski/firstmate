@@ -175,12 +175,16 @@ BEFORE=$(cat "$SETTINGS")
 
 # --- (d2) unparseable settings -> unknown, exit 0 --------------------------
 
-printf 'this is not json {{{{\n' > "$SETTINGS"
+# Truncated mid-object so the file is not JSON yet still holds the credential as
+# raw text: an implementation that echoes file contents on the error path leaks.
+printf '{"env":{"%s":"%s"},"modelProviders":{{{ truncated\n' \
+  "$SECRET_ENV_NAME" "$SECRET_VALUE" > "$SETTINGS"
+BEFORE=$(cat "$SETTINGS")
 OUT=$(run_probe)
 assert_exit_0
 assert_contains "$OUT" "unknown" "unparseable settings must report unknown"
 assert_not_contains "$OUT" "cheap-ok" "unparseable settings must not invent model ids"
-assert_settings_unchanged "$(cat "$SETTINGS")"
+assert_settings_unchanged "$BEFORE"
 # Re-check secret scrub: unparseable file still contains the secret string as
 # raw text - the probe must not echo file contents.
 assert_not_contains "$(cat "$TMP_ROOT/out")$(cat "$TMP_ROOT/err")" "$SECRET_VALUE" \
@@ -190,11 +194,12 @@ pass "unparseable settings -> unknown, exit 0"
 # --- (d3) JSON without modelProviders shape -> unknown ---------------------
 
 printf '{"env":{"%s":"%s"},"model":{"name":"x"}}\n' "$SECRET_ENV_NAME" "$SECRET_VALUE" > "$SETTINGS"
+BEFORE=$(cat "$SETTINGS")
 OUT=$(run_probe)
 assert_exit_0
 assert_contains "$OUT" "unknown" "missing modelProviders must report unknown"
 assert_no_secret_anywhere
-assert_settings_unchanged "$(cat "$SETTINGS")"
+assert_settings_unchanged "$BEFORE"
 pass "JSON without modelProviders -> unknown, exit 0"
 
 # restore full settings
@@ -277,6 +282,73 @@ assert_contains "$OUT" "not-configured-at-all unknown" \
   "unknown id not in settings reports unknown"
 pass "--model for unconfigured id -> unknown, exit 0"
 
+# --- classifier precision: denial wins, trace ids do not deny --------------
+#
+# Three ways the verdict can be wrong in the direction that hurts:
+#   echo-denied    refusal payload quotes the probe prompt (which contains the
+#                  sentinel) - must be denied, never entitled
+#   trace-id-500   transient failure whose request id happens to contain the
+#                  digits 403/404 - must NOT be denied
+#   env-missing    provider names the missing env var - the NAME must survive
+#                  scrubbing so the operator can act on it
+
+cat > "$SETTINGS" <<EOF
+{
+  "env": { "${SECRET_ENV_NAME}": "${SECRET_VALUE}" },
+  "modelProviders": {
+    "openai": [
+      { "id": "echo-denied", "envKey": "${SECRET_ENV_NAME}" },
+      { "id": "trace-id-500", "envKey": "${SECRET_ENV_NAME}" },
+      { "id": "env-missing", "envKey": "${SECRET_ENV_NAME}" }
+    ]
+  }
+}
+EOF
+BEFORE=$(cat "$SETTINGS")
+cat > "$FAKEBIN/qwen" <<'SH'
+#!/usr/bin/env bash
+set -u
+model=
+prompt=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -m|--model) model=$2; shift 2 ;;
+    -p|--prompt) prompt=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$model" in
+  echo-denied)
+    # Refusal payload echoes the request back, sentinel and all.
+    printf 'request was: %s\n' "$prompt"
+    printf 'API Error: 403 Access to model denied.\n' >&2
+    ;;
+  trace-id-500)
+    printf 'API Error: 500 internal error (request_id: 7f403ab2404c)\n' >&2
+    ;;
+  env-missing)
+    printf 'API Error: 401 environment variable BAILIAN_TOKEN_PLAN_API_KEY is not set\n' >&2
+    ;;
+esac
+exit 0
+SH
+chmod +x "$FAKEBIN/qwen"
+
+OUT=$(run_probe)
+assert_exit_0
+assert_settings_unchanged "$BEFORE"
+assert_no_secret_anywhere
+assert_contains "$OUT" "echo-denied denied" \
+  "a refusal that echoes the probe prompt must be denied, not entitled"
+assert_contains "$OUT" "trace-id-500 unknown" \
+  "403/404 digits inside a request id must not be read as a denial"
+assert_contains "$OUT" "env-missing unknown" "a 401 is not an entitlement verdict"
+assert_contains "$OUT" "$SECRET_ENV_NAME" \
+  "env-var NAME must survive scrubbing so the operator sees which var is unset"
+pass "classifier precision: denial beats sentinel, trace ids are not denials, env names survive"
+
+install_fake_qwen
+
 # --- missing qwen binary -> unknown per id, exit 0 -------------------------
 
 write_settings
@@ -304,7 +376,7 @@ pass "missing qwen executable -> unknown per id, exit 0, settings untouched"
 
 write_settings
 BEFORE=$(cat "$SETTINGS")
-help_out=$("$PROBE" --help 2>&1) || true
+help_out=$("$PROBE" --help 2>&1)
 help_code=$?
 expect_code 0 "$help_code" "--help must exit 0"
 assert_contains "$help_out" "fm-model-probe" "help text names the tool"
@@ -314,10 +386,9 @@ pass "--help exits 0 and documents the no-write contract"
 
 # --- usage error is the only non-zero path ---------------------------------
 
-set +e
+# errexit is off for this whole file (set -u only), so nothing to save/restore.
 "$PROBE" --timeout not-a-number >/dev/null 2>"$TMP_ROOT/err"
 code=$?
-set -e
 [ "$code" -ne 0 ] || fail "bad --timeout must be a usage error (non-zero)"
 pass "usage error (bad --timeout) exits non-zero; denials do not"
 

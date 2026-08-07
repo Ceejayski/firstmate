@@ -28,7 +28,9 @@
 # For each id, issues one headless probe:
 #   QWEN_CODE_SUPPRESS_YOLO_WARNING=1 <qwen> -m <id> -p <probe-prompt>
 # with a per-call wall-clock bound (default 100s, matching the investigation that
-# first measured this fleet's split). Serial by design; do not add concurrency
+# first measured this fleet's split). The bound comes from perl alarm, then
+# timeout, then gtimeout - whichever the host has. Only a host with none of the
+# three degrades to an unbounded call. Serial by design; do not add concurrency
 # here unless a measured full pass is actually too slow for operators.
 #
 # Prints exactly one line per model (or one unknown line when no ids could be
@@ -38,16 +40,22 @@
 #   <id> <entitled|denied|unknown> [· latency=<s>] [· error=<text>]
 #
 # Verdicts:
-#   entitled  the probe response contains the sentinel word PROBEOK
-#   denied    the provider refused the model (403/404/access denied/not exist
-#             and kin); error= carries the provider's own text, not a paraphrase
+#   entitled  the model's own stdout carries the sentinel word PROBEOK and no
+#             denial marker appears on either stream. Denial always wins: a
+#             refusal payload that quotes the probe prompt back is not an
+#             entitlement.
+#   denied    the provider refused the model (access denied / model not exist /
+#             a 403 or 404 in status context / not eligible / forbidden and
+#             kin); error= carries the provider's own text, not a paraphrase
 #   unknown   missing CLI, timeout with no PROBEOK, unparseable settings, or
 #             any other outcome that is not a clear entitle or deny
 #
 # Hard safety:
 #   - NEVER prints, logs, or echoes an API key or any credential value from the
 #     settings file. Candidate secret strings collected while parsing are
-#     scrubbed from every printed error field.
+#     scrubbed from every printed error field. Env-var NAMES are not secrets and
+#     are left intact so provider errors that name a missing variable stay
+#     actionable.
 #   - NEVER writes the settings file (or any other credential file). Read only.
 #   - NEVER auto-edits config/crew-dispatch.json. This tool measures; humans
 #     and firstmate decide routing.
@@ -139,21 +147,37 @@ EOF
   sanitize_one_line "$preferred"
 }
 
-# Classify a raw probe response into entitled|denied|unknown.
-# Prints: <verdict>\t<error-or-empty>
-classify_raw() {
-  local raw=$1 timed_out=$2
-  case "$raw" in
-    *"$SENTINEL"*)
-      printf 'entitled\t\n'
+# True when the text carries a provider refusal marker. Status codes are only
+# a refusal in status context - a bare 403/404 also matches request ids and
+# trace tokens, which would drop a healthy model out of routing.
+has_denial_marker() {
+  case "$1" in
+    *'Access to model denied'*|*'Model not exist'*|*'not eligible'*|*'not authorized'*|*'Forbidden'*|*'forbidden'*)
+      return 0
+      ;;
+    *'API Error: 403'*|*'API Error: 404'*|*'status 403'*|*'status 404'*|*'status code 403'*|*'status code 404'*|*'HTTP 403'*|*'HTTP 404'*|*'404 Not Found'*)
       return 0
       ;;
   esac
+  return 1
+}
+
+# Classify a probe response into entitled|denied|unknown.
+# out_raw is the model's own stdout; raw is stdout+stderr combined.
+# Prints: <verdict>\t<error-or-empty>
+classify_raw() {
+  local out_raw=$1 raw=$2 timed_out=$3
   # Provider refusals - match on the shapes this fleet has actually seen and
   # close kin. Keep the raw text for the error= field; do not paraphrase.
-  case "$raw" in
-    *'Access to model denied'*|*'403'*|*'Model not exist'*|*'404'*|*'not eligible'*|*'not authorized'*|*'Forbidden'*|*'forbidden'*)
-      printf 'denied\t%s\n' "$(extract_error_text "$raw")"
+  # Checked before the sentinel: a refusal payload that echoes the probe prompt
+  # (which contains PROBEOK) is a denial, not an entitlement.
+  if has_denial_marker "$raw"; then
+    printf 'denied\t%s\n' "$(extract_error_text "$raw")"
+    return 0
+  fi
+  case "$out_raw" in
+    *"$SENTINEL"*)
+      printf 'entitled\t\n'
       return 0
       ;;
   esac
@@ -215,19 +239,23 @@ if not isinstance(data, dict):
 ids = []
 secrets = []
 
+# Keys whose value is the NAME of an env var, not credential material. The
+# value under env[name] is the actual secret and is collected separately, so
+# redacting the name here would only hide the provider's own diagnostic
+# ("environment variable X is not set") from the operator.
+NAME_ONLY_KEYS = {"envKey", "apiKeyEnvVar", "apiKeyEnv", "tokenEnv"}
+
+
 def walk_secrets(obj):
     if isinstance(obj, dict):
         for k, v in obj.items():
+            if k in NAME_ONLY_KEYS:
+                continue
             lk = str(k).lower()
             if isinstance(v, str) and v and any(
                 s in lk for s in ("key", "token", "secret", "password", "auth", "credential")
             ):
                 secrets.append(v)
-            elif k == "envKey" and isinstance(v, str) and v:
-                # envKey is a NAME; the value lives under env[name]. Collected
-                # separately below. Still record short names only if they look
-                # like embedded secrets (they usually do not).
-                pass
             else:
                 walk_secrets(v)
     elif isinstance(obj, list):
@@ -278,56 +306,94 @@ sys.exit(0)
 PY
 }
 
+# Which wall-clock bound this host can enforce. perl alarm is the method the
+# original investigation measured with and stays first; timeout/gtimeout are the
+# same ladder the rest of bin/ uses. `none` is an unbounded best-effort call and
+# only happens on a host carrying none of the three.
+probe_bound() {
+  if command -v perl >/dev/null 2>&1; then
+    printf 'perl\n'
+  elif command -v timeout >/dev/null 2>&1; then
+    printf 'timeout\n'
+  elif command -v gtimeout >/dev/null 2>&1; then
+    printf 'gtimeout\n'
+  else
+    printf 'none\n'
+  fi
+}
+
 run_one_probe() {
   local id=$1
-  local start end latency raw timed_out=0 verdict err scrubbed
-  local out_file rc=0
+  local start end latency raw out_raw err_raw timed_out=0 verdict err scrubbed
+  local out_file err_file rc=0
   # Export once for the child process; subshells inherit it (shellcheck SC2030/31).
   export QWEN_CODE_SUPPRESS_YOLO_WARNING=1
 
   out_file=$(mktemp "${TMPDIR:-/tmp}/fm-model-probe-out.XXXXXX")
+  err_file=$(mktemp "${TMPDIR:-/tmp}/fm-model-probe-err.XXXXXX")
   start=$(date +%s)
 
-  # Bound the wall clock. perl alarm is portable on this fleet's macOS hosts
-  # and was the measurement method in the original investigation.
+  # Bound the wall clock so one hung provider cannot stall the whole serial pass.
   # Critically: the child's stdin must NOT be the model-id list. The outer
   # loop reads ids from a redirected file; an inherited stdin lets qwen (or
   # any child) drain the remaining ids and silently drop them from the run.
-  if command -v perl >/dev/null 2>&1; then
-    (
-      cd "$WORKDIR" || exit 1
-      perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" "$QWEN_BIN" -m "$id" -p "$PROBE_PROMPT" </dev/null
-    ) >"$out_file" 2>&1
-    rc=$?
-    # 142 = 128 + SIGALRM on many systems; also treat 14 / timeout-ish as timed out
-    if [ "$rc" -eq 142 ] || [ "$rc" -eq 14 ]; then
-      timed_out=1
-    fi
-  else
-    # Fallback without perl: best-effort unbounded (still exit 0 on outcome).
-    (
-      cd "$WORKDIR" || exit 1
-      "$QWEN_BIN" -m "$id" -p "$PROBE_PROMPT" </dev/null
-    ) >"$out_file" 2>&1
-    rc=$?
-  fi
+  # Streams stay separate: the sentinel only counts on the model's own stdout.
+  case "$PROBE_BOUND" in
+    perl)
+      (
+        cd "$WORKDIR" || exit 1
+        perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" "$QWEN_BIN" -m "$id" -p "$PROBE_PROMPT" </dev/null
+      ) >"$out_file" 2>"$err_file"
+      rc=$?
+      # 142 = 128 + SIGALRM on many systems; also treat 14 / timeout-ish as timed out
+      if [ "$rc" -eq 142 ] || [ "$rc" -eq 14 ]; then
+        timed_out=1
+      fi
+      ;;
+    timeout|gtimeout)
+      (
+        cd "$WORKDIR" || exit 1
+        "$PROBE_BOUND" "$TIMEOUT" "$QWEN_BIN" -m "$id" -p "$PROBE_PROMPT" </dev/null
+      ) >"$out_file" 2>"$err_file"
+      rc=$?
+      # 124 = timeout's own signal that the budget was hit; 137 = 128 + SIGKILL.
+      if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        timed_out=1
+      fi
+      ;;
+    *)
+      # No bound available on this host: best-effort unbounded call. The
+      # post-hoc latency check below is the only guard left.
+      (
+        cd "$WORKDIR" || exit 1
+        "$QWEN_BIN" -m "$id" -p "$PROBE_PROMPT" </dev/null
+      ) >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
+  esac
 
   end=$(date +%s)
   latency=$((end - start))
-  raw=$(cat "$out_file" 2>/dev/null || true)
-  rm -f "$out_file"
+  out_raw=$(cat "$out_file" 2>/dev/null || true)
+  err_raw=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$out_file" "$err_file"
+  if [ -n "$out_raw" ] && [ -n "$err_raw" ]; then
+    raw="$out_raw"$'\n'"$err_raw"
+  else
+    raw="${out_raw}${err_raw}"
+  fi
 
   # If the wall clock exceeded the budget, treat as timed out even when the
-  # shell wrapper did not surface alarm's exit code cleanly.
+  # shell wrapper did not surface the bound's exit code cleanly.
   if [ "$latency" -ge "$TIMEOUT" ] && [ "$timed_out" = 0 ]; then
-    case "$raw" in
+    case "$out_raw" in
       *"$SENTINEL"*) : ;;
       *) timed_out=1 ;;
     esac
   fi
 
   # classify_raw prints verdict\terror (error may be empty)
-  IFS=$'\t' read -r verdict err < <(classify_raw "$raw" "$timed_out")
+  IFS=$'\t' read -r verdict err < <(classify_raw "$out_raw" "$raw" "$timed_out")
   scrubbed=$(scrub_secrets "${err:-}" "$SECRETS_FILE")
   scrubbed=$(sanitize_one_line "$scrubbed")
   print_result_line "$id" "$verdict" "$latency" "$scrubbed"
@@ -395,6 +461,8 @@ esac
 if [ -z "$SETTINGS" ]; then
   SETTINGS="${QWEN_HOME:-$HOME/.qwen}/settings.json"
 fi
+
+PROBE_BOUND=$(probe_bound)
 
 # --- workspace for the probe process (never the caller's cwd credentials) ---
 
