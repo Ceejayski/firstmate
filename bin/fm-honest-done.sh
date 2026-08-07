@@ -594,12 +594,26 @@ sha256_text() {
 # Our own fm-test-run children share this script's pgid and are ignored.
 # FM_HONEST_DONE_FORCE_CONTENDED=1 forces true (tests only).
 suite_contention_detected() {
-  local self_pid=$$ self_pgid pid pgid cmd
+  local self_pid=$$ self_pgid pid pgid cmd anc cur ignore
   if [ "${FM_HONEST_DONE_FORCE_CONTENDED:-}" = 1 ]; then
     return 0
   fi
   self_pgid=$(ps -o pgid= -p "$self_pid" 2>/dev/null | tr -d ' ')
   [ -n "$self_pgid" ] || self_pgid=$self_pid
+
+  # Ancestor pid set so a parent harness (e.g. bin/fm-test-run.sh running this
+  # script's contract tests) is not treated as a competing peer suite.
+  ignore=" $self_pid "
+  cur=$self_pid
+  while [ -n "$cur" ] && [ "$cur" -gt 1 ]; do
+    anc=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ')
+    [ -n "$anc" ] || break
+    case "$ignore" in
+      *" $anc "*) break ;;
+    esac
+    ignore="$ignore$anc "
+    cur=$anc
+  done
 
   # BSD and GNU ps both accept -ax with -o pid=,pgid=,command=
   while IFS= read -r line; do
@@ -611,12 +625,14 @@ suite_contention_detected() {
     shift 2 2>/dev/null || continue
     cmd=$*
     [ -n "$pid" ] || continue
-    [ "$pid" = "$self_pid" ] && continue
+    case "$ignore" in
+      *" $pid "*) continue ;;
+    esac
     [ "$pgid" = "$self_pgid" ] && continue
-    # Match suite runners in the command line (space-padded or bare).
+    # Longer tokens first so e.g. pnpm is not swallowed by a shorter npm pattern.
     case "$cmd" in
-      *fm-test-run.sh*|*fm-honest-done.sh*|*vitest*|*npm\ test*|*npm\ run\ test*|\
-      *pnpm\ test*|*yarn\ test*|*pytest*|*cargo\ test*)
+      *fm-test-run.sh*|*fm-honest-done.sh*|*vitest*|*npm\ run\ test*|*pnpm\ test*|\
+      *yarn\ test*|*pytest*|*cargo\ test*|*npm\ test*)
         return 0
         ;;
     esac
