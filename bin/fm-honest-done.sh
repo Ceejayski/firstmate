@@ -4,13 +4,25 @@
 # Runs the project's discovered test command on the current branch HEAD and on
 # the merge target, compares failure name sets, and prints exactly one line:
 #
-#   <N> pass / <M> fail on branch; <P> pass / <Q> fail on target; failure set <BYTE-IDENTICAL|BRANCH-INTRODUCED: <names>>
+#   <N> pass / <M> fail on branch; <P> pass / <Q> fail on target; failure set <VERDICT>; branch=<sha> target=<sha>
+#
+# VERDICT is one of:
+#   BYTE-IDENTICAL              failure-name sets equal (solo + uncontended only)
+#   BRANCH-INTRODUCED: <names>  names present on branch but not target (solo + uncontended)
+#   UNVERIFIED                  no --solo / FM_HONEST_DONE_SOLO=1; counts may still print
+#   CONTENDED                   competing suite activity detected; do not trust the compare
+#
+# A comparison verdict (BYTE-IDENTICAL / BRANCH-INTRODUCED) is refused unless the
+# operator asserts solo measurement AND no competing suite process is observed.
+# A contended or unverified run must not look like a clean baseline: that is the
+# failure mode this tool exists to prevent.
 #
 # or, when no test command can be discovered without guessing:
 #
 #   unknown
 #
 # Usage:
+#   fm-honest-done.sh --solo [--dir <path>] [--target <ref>]
 #   fm-honest-done.sh [--dir <path>] [--target <ref>]
 #   fm-honest-done.sh --discover-only [--dir <path>]
 #   fm-honest-done.sh -h | --help
@@ -19,6 +31,9 @@
 #   --dir <path>     project worktree to measure (default: cwd)
 #   --target <ref>   merge-target ref (default: origin/<default-branch> if that
 #                    ref exists, else <default-branch>)
+#   --solo           operator asserts nothing else is competing for the suite;
+#                    required for BYTE-IDENTICAL / BRANCH-INTRODUCED. Also set by
+#                    FM_HONEST_DONE_SOLO=1. Disables target-result cache reuse.
 #   --discover-only  print the discovered test command (or `unknown`) and exit 0
 #                    without running the suite
 #   -h, --help       print this header
@@ -46,9 +61,10 @@
 #
 # Cache:
 #   Target results may be reused under ${TMPDIR:-/tmp}/fm-honest-done-cache/
-#   keyed by exact target commit SHA + test command. A commit is immutable, so
-#   that key cannot go stale into a wrong verdict. Branch (HEAD) is always run
-#   fresh. Set FM_HONEST_DONE_NO_CACHE=1 to force a double run.
+#   keyed by exact target commit SHA + test command, only when not --solo.
+#   A commit is immutable, but a cached result may have been taken under
+#   contention, so solo runs always re-measure the target. Branch (HEAD) is
+#   always run fresh. Set FM_HONEST_DONE_NO_CACHE=1 to force a double run.
 #
 # Exit status:
 #   0  measured line or `unknown` printed
@@ -71,6 +87,10 @@ die() {
 DIR=
 TARGET_REF=
 DISCOVER_ONLY=0
+SOLO=0
+if [ "${FM_HONEST_DONE_SOLO:-}" = 1 ]; then
+  SOLO=1
+fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help)
@@ -93,6 +113,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --target=*)
       TARGET_REF=${1#--target=}
+      shift
+      ;;
+    --solo)
+      SOLO=1
       shift
       ;;
     --discover-only)
@@ -566,6 +590,41 @@ sha256_text() {
   fi
 }
 
+# True when another process looks like a suite runner outside our process group.
+# Our own fm-test-run children share this script's pgid and are ignored.
+# FM_HONEST_DONE_FORCE_CONTENDED=1 forces true (tests only).
+suite_contention_detected() {
+  local self_pid=$$ self_pgid pid pgid cmd
+  if [ "${FM_HONEST_DONE_FORCE_CONTENDED:-}" = 1 ]; then
+    return 0
+  fi
+  self_pgid=$(ps -o pgid= -p "$self_pid" 2>/dev/null | tr -d ' ')
+  [ -n "$self_pgid" ] || self_pgid=$self_pid
+
+  # BSD and GNU ps both accept -ax with -o pid=,pgid=,command=
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    # shellcheck disable=SC2086 # word-split pid pgid from ps columns
+    set -- $line
+    pid=$1
+    pgid=$2
+    shift 2 2>/dev/null || continue
+    cmd=$*
+    [ -n "$pid" ] || continue
+    [ "$pid" = "$self_pid" ] && continue
+    [ "$pgid" = "$self_pgid" ] && continue
+    # Match suite runners in the command line (space-padded or bare).
+    case "$cmd" in
+      *fm-test-run.sh*|*fm-honest-done.sh*|*vitest*|*npm\ test*|*npm\ run\ test*|\
+      *pnpm\ test*|*yarn\ test*|*pytest*|*cargo\ test*)
+        return 0
+        ;;
+    esac
+  done < <(ps -ax -o pid=,pgid=,command= 2>/dev/null || ps -ax -o pid=,pgid=,command=)
+
+  return 1
+}
+
 CACHE_ROOT="${TMPDIR:-/tmp}/fm-honest-done-cache"
 TARGET_WT=
 TARGET_WT_ADDED=0
@@ -600,7 +659,8 @@ fi
 
 TARGET_SHA=$(git -C "$DIR" rev-parse --verify "${TARGET_REF}^{commit}") \
   || die "cannot resolve target ref: $TARGET_REF"
-# Branch is always the worktree HEAD; no separate SHA var needed beyond the run.
+BRANCH_SHA=$(git -C "$DIR" rev-parse --verify "HEAD^{commit}") \
+  || die "cannot resolve HEAD in $DIR"
 
 BEFORE_FP=$(fingerprint_caller "$DIR")
 
@@ -610,6 +670,11 @@ TARGET_LOG="$WORK/target.log"
 BRANCH_PREFIX="$WORK/branch"
 TARGET_PREFIX="$WORK/target"
 
+CONTENDED=0
+if suite_contention_detected; then
+  CONTENDED=1
+fi
+
 # --- branch (always fresh, in place) ---
 branch_rc=$(run_suite_in_dir "$DIR" "$TEST_CMD" "$BRANCH_LOG")
 parse_suite_output "$BRANCH_PREFIX" "$BRANCH_LOG" "$branch_rc"
@@ -617,13 +682,19 @@ BRANCH_PASS=$(cat "$BRANCH_PREFIX.pass")
 BRANCH_FAIL=$(cat "$BRANCH_PREFIX.fail")
 BRANCH_NAMES="$BRANCH_PREFIX.names"
 
+if suite_contention_detected; then
+  CONTENDED=1
+fi
+
 # --- target (temp detached worktree; optional SHA+cmd cache) ---
 cmd_hash=$(sha256_text "$TEST_CMD")
 cache_dir="$CACHE_ROOT/$TARGET_SHA"
 cache_file="$cache_dir/$cmd_hash.result"
 cache_names="$cache_dir/$cmd_hash.names"
 use_cache=0
-if [ "${FM_HONEST_DONE_NO_CACHE:-}" != 1 ] && [ -f "$cache_file" ] && [ -f "$cache_names" ]; then
+# Solo measurements never reuse cache: a prior result may have been contended.
+if [ "$SOLO" -eq 0 ] && [ "${FM_HONEST_DONE_NO_CACHE:-}" != 1 ] \
+  && [ -f "$cache_file" ] && [ -f "$cache_names" ]; then
   # Cache format: pass<TAB>fail on line 1.
   if IFS=$(printf '\t') read -r TARGET_PASS TARGET_FAIL <"$cache_file"; then
     case "$TARGET_PASS$TARGET_FAIL" in
@@ -652,9 +723,11 @@ if [ "$use_cache" -eq 0 ]; then
   TARGET_PASS=$(cat "$TARGET_PREFIX.pass")
   TARGET_FAIL=$(cat "$TARGET_PREFIX.fail")
 
-  mkdir -p "$cache_dir"
-  printf '%s\t%s\n' "$TARGET_PASS" "$TARGET_FAIL" >"$cache_file"
-  cp "$TARGET_PREFIX.names" "$cache_names"
+  if [ "$SOLO" -eq 0 ]; then
+    mkdir -p "$cache_dir"
+    printf '%s\t%s\n' "$TARGET_PASS" "$TARGET_FAIL" >"$cache_file"
+    cp "$TARGET_PREFIX.names" "$cache_names"
+  fi
 
   git -C "$DIR" worktree remove --force "$TARGET_WT" >/dev/null 2>&1 || rm -rf "$TARGET_WT"
   TARGET_WT_ADDED=0
@@ -664,27 +737,39 @@ else
   TARGET_FAIL=$(cat "$TARGET_PREFIX.fail")
 fi
 
+if suite_contention_detected; then
+  CONTENDED=1
+fi
+
 AFTER_FP=$(fingerprint_caller "$DIR")
 if [ "$BEFORE_FP" != "$AFTER_FP" ]; then
   die "git state changed during measurement (HEAD/branch/status must be untouched)"
 fi
 
-# Failure-set compare.
-# BYTE-IDENTICAL when the branch introduces no failure names absent on target
-# (including when the sorted sets are equal). BRANCH-INTRODUCED lists names
-# present on the branch but not on the target. Counts always come from both
-# runs so an inherited red and a new red stay distinguishable.
+# Verdict: never emit BYTE-IDENTICAL / BRANCH-INTRODUCED without solo + quiet.
+# BYTE-IDENTICAL requires equal failure-name sets (not merely empty introductions).
 INTRODUCED=$(LC_ALL=C comm -13 "$TARGET_PREFIX.names" "$BRANCH_NAMES" || true)
-if [ -n "$INTRODUCED" ]; then
+if [ "$CONTENDED" -eq 1 ]; then
+  SET_LABEL='CONTENDED'
+elif [ "$SOLO" -eq 0 ]; then
+  SET_LABEL='UNVERIFIED'
+elif [ -n "$INTRODUCED" ]; then
   names_joined=$(
     printf '%s\n' "$INTRODUCED" \
       | awk 'BEGIN { ORS = "" } { if (NR > 1) printf ", "; printf "%s", $0 } END { print "" }'
   )
   SET_LABEL="BRANCH-INTRODUCED: $names_joined"
-else
+elif cmp -s "$BRANCH_NAMES" "$TARGET_PREFIX.names" 2>/dev/null; then
   SET_LABEL='BYTE-IDENTICAL'
+else
+  # Sets differ only by target-only failures (branch fixed some ambient reds,
+  # or flake asymmetry). That is not BYTE-IDENTICAL; with solo it is still a
+  # real observation of "no branch-introduced names", reported without claiming
+  # set equality.
+  SET_LABEL='BRANCH-INTRODUCED: (none)'
 fi
 
-printf '%s pass / %s fail on branch; %s pass / %s fail on target; failure set %s\n' \
-  "$BRANCH_PASS" "$BRANCH_FAIL" "$TARGET_PASS" "$TARGET_FAIL" "$SET_LABEL"
+printf '%s pass / %s fail on branch; %s pass / %s fail on target; failure set %s; branch=%s target=%s\n' \
+  "$BRANCH_PASS" "$BRANCH_FAIL" "$TARGET_PASS" "$TARGET_FAIL" "$SET_LABEL" \
+  "$BRANCH_SHA" "$TARGET_SHA"
 exit 0

@@ -3,8 +3,10 @@
 # for ship done-reports.
 #
 # Fixtures cover:
-#   - branch introduces a failure (BRANCH-INTRODUCED naming the test)
+#   - branch introduces a failure (BRANCH-INTRODUCED naming the test) with --solo
 #   - branch failure set matches target (BYTE-IDENTICAL), including inherited red
+#   - without --solo the verdict is UNVERIFIED (counts may still print)
+#   - forced contention with --solo yields CONTENDED, not a comparison verdict
 #   - project with no discoverable test command (unknown, exit 0)
 #   - .no-mistakes.yaml commands.test discovery, with and without python3 yaml
 #   - git state (HEAD / branch / porcelain) unchanged after a run
@@ -91,11 +93,21 @@ run_honest() {
   "$HONEST" --dir "$wt" "$@"
 }
 
+# Solo measurement helper: asserts exclusive suite access for a real verdict.
+run_honest_solo() {
+  local wt=$1
+  shift
+  "$HONEST" --solo --dir "$wt" "$@"
+}
+
 test_help_and_executable() {
   local help
   help=$("$HONEST" --help 2>&1) || fail "fm-honest-done.sh --help exited non-zero"
   assert_contains "$help" "BYTE-IDENTICAL" "help missing BYTE-IDENTICAL form"
   assert_contains "$help" "BRANCH-INTRODUCED" "help missing BRANCH-INTRODUCED form"
+  assert_contains "$help" "UNVERIFIED" "help missing UNVERIFIED form"
+  assert_contains "$help" "CONTENDED" "help missing CONTENDED form"
+  assert_contains "$help" "--solo" "help missing --solo"
   assert_contains "$help" "unknown" "help missing unknown discovery path"
   pass "fm-honest-done.sh: help documents the one-line form"
 }
@@ -122,7 +134,7 @@ test_branch_introduced_names_failure() {
   git -C "$case_dir/wt" add FAIL_TESTS
   git -C "$case_dir/wt" commit -qm "branch breaks gamma" >/dev/null
 
-  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
+  out=$(run_honest_solo "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
   expect_code 0 "$rc" "measurement must exit 0 even when suite red (got $rc)"
   assert_contains "$out" "fail on branch" "missing branch side: $out"
   assert_contains "$out" "fail on target" "missing target side: $out"
@@ -131,6 +143,8 @@ test_branch_introduced_names_failure() {
   # Counts: branch 2 pass / 1 fail; target 3 pass / 0 fail
   assert_contains "$out" "2 pass / 1 fail on branch" "branch counts wrong: $out"
   assert_contains "$out" "3 pass / 0 fail on target" "target counts wrong: $out"
+  assert_contains "$out" "branch=" "solo line must name branch SHA: $out"
+  assert_contains "$out" "target=" "solo line must name target SHA: $out"
   pass "fm-honest-done.sh: branch-introduced failure names the test"
 }
 
@@ -151,7 +165,7 @@ test_byte_identical_including_inherited_red() {
   # Move worktree branch onto the red main tip + keep same FAIL_TESTS.
   git -C "$case_dir/wt" reset --hard origin/main >/dev/null
 
-  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
+  out=$(run_honest_solo "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
   expect_code 0 "$rc" "inherited red measurement must exit 0"
   assert_contains "$out" "2 pass / 1 fail on branch" "branch counts wrong: $out"
   assert_contains "$out" "2 pass / 1 fail on target" "target counts wrong: $out"
@@ -173,7 +187,7 @@ test_git_state_untouched() {
   git -C "$case_dir/wt" commit -qm "branch fails beta" >/dev/null
 
   before=$(fingerprint "$case_dir/wt")
-  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null) \
+  out=$(run_honest_solo "$case_dir/wt" --target origin/main 2>/dev/null) \
     || fail "honest-done exited non-zero during no-mutate check"
   after=$(fingerprint "$case_dir/wt")
   [ "$before" = "$after" ] || fail "git state changed:\nbefore:\n$before\nafter:\n$after\nout=$out"
@@ -237,7 +251,7 @@ SH
   git -C "$case_dir/wt" add FAIL_TESTS
   git -C "$case_dir/wt" commit -qm "branch breaks gamma" >/dev/null
 
-  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
+  out=$(run_honest_solo "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
   expect_code 0 "$rc" "jest-summary measurement must exit 0 (got $rc, out=$out)"
   assert_contains "$out" "2 pass / 1 fail on branch" "jest branch counts wrong: $out"
   assert_contains "$out" "3 pass / 0 fail on target" "jest target counts wrong: $out"
@@ -256,8 +270,11 @@ test:
 MK
   git -C "$case_dir/wt" add -A
   git -C "$case_dir/wt" commit -qm "switch to make test" >/dev/null
+  # Keep target on the same declared command so the compare is about discovery,
+  # not an unparseable target tree left on the package.json baseline.
+  git -C "$case_dir/wt" push -q origin HEAD:main
 
-  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
+  out=$(run_honest_solo "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
   expect_code 0 "$rc" "makefile discovery run failed: $out"
   assert_contains "$out" "3 pass / 0 fail on branch" "makefile path counts wrong: $out"
   assert_contains "$out" "failure set BYTE-IDENTICAL" "makefile path label wrong: $out"
@@ -291,7 +308,8 @@ YML
   expect_code 0 "$rc" ".no-mistakes.yaml awk fallback exited non-zero: $out"
   [ "$out" = "./run-suite.sh" ] || fail "awk fallback should match python parse, got: $out"
 
-  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
+  git -C "$case_dir/wt" push -q origin HEAD:main
+  out=$(run_honest_solo "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
   expect_code 0 "$rc" ".no-mistakes.yaml measurement failed: $out"
   assert_contains "$out" "3 pass / 0 fail on branch" "nm-yaml branch counts wrong: $out"
   assert_contains "$out" "failure set BYTE-IDENTICAL" "nm-yaml label wrong: $out"
@@ -355,13 +373,41 @@ SH
   # Also put the same tree on origin/main so target resolves the fake runner.
   git -C "$case_dir/wt" push -q origin HEAD:main
 
-  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
+  out=$(run_honest_solo "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
   expect_code 0 "$rc" "CI discovery measurement failed: $out"
   # Three lanes x 1 = 3 pass each side.
   assert_contains "$out" "3 pass / 0 fail on branch" "CI lane composition counts wrong: $out"
   assert_contains "$out" "3 pass / 0 fail on target" "CI target counts wrong: $out"
   assert_contains "$out" "failure set BYTE-IDENTICAL" "CI path label wrong: $out"
   pass "fm-honest-done.sh: discovers and composes CI portable fm-test-run lanes"
+}
+
+test_without_solo_reports_unverified() {
+  local case_dir out rc
+  case_dir=$(make_repo no-solo)
+  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "non-solo measure must still exit 0"
+  assert_contains "$out" "3 pass / 0 fail on branch" "non-solo counts still required: $out"
+  assert_contains "$out" "failure set UNVERIFIED" "without --solo must be UNVERIFIED, got: $out"
+  if printf '%s' "$out" | grep -qE 'failure set (BYTE-IDENTICAL|BRANCH-INTRODUCED)'; then
+    fail "without --solo must not emit a comparison verdict: $out"
+  fi
+  pass "fm-honest-done.sh: without --solo reports UNVERIFIED"
+}
+
+test_contended_solo_reports_contended() {
+  local case_dir out rc
+  case_dir=$(make_repo contended)
+  out=$(
+    FM_HONEST_DONE_FORCE_CONTENDED=1 \
+      run_honest_solo "$case_dir/wt" --target origin/main 2>/dev/null
+  ); rc=$?
+  expect_code 0 "$rc" "contended measure must still exit 0"
+  assert_contains "$out" "failure set CONTENDED" "solo+contention must be CONTENDED, got: $out"
+  if printf '%s' "$out" | grep -qE 'failure set (BYTE-IDENTICAL|BRANCH-INTRODUCED)'; then
+    fail "contended run must not emit a comparison verdict: $out"
+  fi
+  pass "fm-honest-done.sh: contended solo reports CONTENDED not a verdict"
 }
 
 # firstmate itself: CI is the discoverable source when package/Makefile/nm miss.
@@ -398,4 +444,6 @@ test_vitest_jest_summary_counts
 test_makefile_discovery
 test_no_mistakes_yaml_discovery
 test_ci_portable_lanes_discovery
+test_without_solo_reports_unverified
+test_contended_solo_reports_contended
 test_firstmate_repo_discovers_ci_not_unknown

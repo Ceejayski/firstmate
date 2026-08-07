@@ -416,10 +416,12 @@ EOF
       "$ROOT/bin/fm-brief.sh" "$id" "$mode_proj" >/dev/null 2>&1 \
       || fail "ship scaffold for $mode_proj exited non-zero"
     brief="$home/data/$id/brief.md"
-    assert_grep "$ROOT/bin/fm-honest-done.sh" "$brief" \
-      "$mode_proj ship brief must require fm-honest-done.sh by absolute path"
+    assert_grep "$ROOT/bin/fm-honest-done.sh --solo" "$brief" \
+      "$mode_proj ship brief must require fm-honest-done.sh --solo by absolute path"
     assert_grep "failure set BYTE-IDENTICAL" "$brief" \
       "$mode_proj ship brief must show the proven one-line form"
+    assert_grep 'CONTENDED' "$brief" \
+      "$mode_proj ship brief must mention CONTENDED as a non-verdict"
     assert_grep 'Do not invent pass/fail counts' "$brief" \
       "$mode_proj ship brief must forbid invented suite counts"
     assert_grep 'No CI configured' "$brief" \
