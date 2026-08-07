@@ -400,6 +400,42 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Ship briefs must require the honest-done measurement line; scout/secondmate must not.
+test_ship_done_requires_honest_done_measurement() {
+  local home brief mode_proj id
+  home="$TMP_ROOT/honest-done-brief-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- direct-proj [direct-PR] - fixture for direct-PR mode (added 2026-07-01)
+- local-proj [local-only] - fixture for local-only mode (added 2026-07-01)
+EOF
+
+  for mode_proj in some-proj direct-proj local-proj; do
+    id="brief-honest-$mode_proj"
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      "$ROOT/bin/fm-brief.sh" "$id" "$mode_proj" >/dev/null 2>&1 \
+      || fail "ship scaffold for $mode_proj exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_grep "$ROOT/bin/fm-honest-done.sh --solo" "$brief" \
+      "$mode_proj ship brief must require fm-honest-done.sh --solo by absolute path"
+    assert_grep "failure set BYTE-IDENTICAL" "$brief" \
+      "$mode_proj ship brief must show the proven one-line form"
+    assert_grep 'CONTENDED' "$brief" \
+      "$mode_proj ship brief must mention CONTENDED as a non-verdict"
+    assert_grep 'Do not invent pass/fail counts' "$brief" \
+      "$mode_proj ship brief must forbid invented suite counts"
+    assert_grep 'No CI configured' "$brief" \
+      "$mode_proj ship brief must reject treating absent CI as a pass"
+  done
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" brief-honest-scout some-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-honest-scout/brief.md"
+  assert_no_grep "fm-honest-done.sh" "$brief" \
+    "scout brief must not require suite measurement"
+  pass "fm-brief.sh: every ship mode requires honest-done measurement; scout does not"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -415,3 +451,4 @@ test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_ship_done_requires_honest_done_measurement
