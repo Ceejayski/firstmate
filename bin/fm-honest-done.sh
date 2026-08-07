@@ -10,7 +10,8 @@
 #   BYTE-IDENTICAL              failure-name sets equal (solo + uncontended only)
 #   BRANCH-INTRODUCED: <names>  names present on branch but not target (solo + uncontended)
 #   UNVERIFIED                  no --solo / FM_HONEST_DONE_SOLO=1; counts may still print
-#   CONTENDED                   competing suite activity detected; do not trust the compare
+#   CONTENDED                   competing suite activity detected, or the process
+#                               table could not be read at all; do not trust the compare
 #
 # A comparison verdict (BYTE-IDENTICAL / BRANCH-INTRODUCED) is refused unless the
 # operator asserts solo measurement AND no competing suite process is observed.
@@ -65,6 +66,9 @@
 #   A commit is immutable, but a cached result may have been taken under
 #   contention, so solo runs always re-measure the target. Branch (HEAD) is
 #   always run fresh. Set FM_HONEST_DONE_NO_CACHE=1 to force a double run.
+#   The cache root must be a caller-owned directory that is not group- or
+#   other-writable (it is created mode 0700); otherwise the cache is neither
+#   read nor written, since anyone else could have planted results in it.
 #
 # Exit status:
 #   0  measured line or `unknown` printed
@@ -596,11 +600,14 @@ sha256_text() {
   fi
 }
 
-# True when another process looks like a suite runner outside our process group.
+# True when another process looks like a suite runner outside our process group,
+# and also when the process table cannot be observed at all: a machine whose
+# processes are unlistable cannot be certified quiet, so it is reported as
+# contended rather than silently passing as a clean solo measurement.
 # Our own fm-test-run children share this script's pgid and are ignored.
 # FM_HONEST_DONE_FORCE_CONTENDED=1 forces true (tests only).
 suite_contention_detected() {
-  local self_pid=$$ self_pgid pid pgid cmd anc cur ignore
+  local self_pid=$$ self_pgid pid pgid cmd anc cur ignore ps_rows saw_row=0
   if [ "${FM_HONEST_DONE_FORCE_CONTENDED:-}" = 1 ]; then
     return 0
   fi
@@ -628,6 +635,7 @@ suite_contention_detected() {
   done
 
   # BSD and GNU ps both accept -ax with -o pid=,pgid=,command=
+  ps_rows=$(ps -ax -o pid=,pgid=,command= 2>/dev/null) || ps_rows=
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     # shellcheck disable=SC2086 # word-split pid pgid from ps columns
@@ -636,7 +644,10 @@ suite_contention_detected() {
     pgid=$2
     shift 2 2>/dev/null || continue
     cmd=$*
-    [ -n "$pid" ] || continue
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    saw_row=1
     case "$ignore" in
       *" $pid "*) continue ;;
     esac
@@ -648,12 +659,41 @@ suite_contention_detected() {
         return 0
         ;;
     esac
-  done < <(ps -ax -o pid=,pgid=,command= 2>/dev/null || ps -ax -o pid=,pgid=,command=)
+  done <<<"$ps_rows"
+
+  # No usable row at all (ps missing, restricted, or hidepid): unobservable is
+  # not the same as quiet.
+  [ "$saw_row" -eq 1 ] || return 0
 
   return 1
 }
 
 CACHE_ROOT="${TMPDIR:-/tmp}/fm-honest-done-cache"
+
+# True when CACHE_ROOT is a private, caller-owned directory (mode 0700, not a
+# symlink). In a world-writable /tmp another user could otherwise pre-create the
+# predictable cache path and dictate the target-side counts this tool reports.
+cache_root_ready() {
+  local mode
+  [ -n "$CACHE_ROOT" ] || return 1
+  [ -L "$CACHE_ROOT" ] && return 1
+  if [ ! -d "$CACHE_ROOT" ]; then
+    mkdir -p "${CACHE_ROOT%/*}" 2>/dev/null || return 1
+    mkdir -m 0700 "$CACHE_ROOT" 2>/dev/null || return 1
+  fi
+  [ -d "$CACHE_ROOT" ] || return 1
+  [ -O "$CACHE_ROOT" ] || return 1
+  mode=$(stat -f '%Lp' "$CACHE_ROOT" 2>/dev/null || stat -c '%a' "$CACHE_ROOT" 2>/dev/null) || mode=
+  case "$mode" in
+    ''|*[!0-7]*) return 1 ;;
+  esac
+  # Group/other-writable means anyone could already have planted results here.
+  [ $(( 8#$mode & 0022 )) -eq 0 ] || return 1
+  if [ "$mode" != 700 ]; then
+    chmod 0700 "$CACHE_ROOT" 2>/dev/null || return 1
+  fi
+  return 0
+}
 TARGET_WT=
 TARGET_WT_ADDED=0
 WORK=
@@ -722,7 +762,9 @@ cache_names="$cache_dir/$cmd_hash.names"
 use_cache=0
 # Solo measurements never reuse cache: a prior result may have been contended.
 if [ "$SOLO" -eq 0 ] && [ "${FM_HONEST_DONE_NO_CACHE:-}" != 1 ] \
-  && [ -f "$cache_file" ] && [ -f "$cache_names" ]; then
+  && cache_root_ready && [ -O "$cache_dir" ] \
+  && [ -f "$cache_file" ] && [ -O "$cache_file" ] \
+  && [ -f "$cache_names" ] && [ -O "$cache_names" ]; then
   # Cache format: pass<TAB>fail on line 1.
   if IFS=$(printf '\t') read -r TARGET_PASS TARGET_FAIL <"$cache_file"; then
     case "$TARGET_PASS$TARGET_FAIL" in
@@ -751,10 +793,11 @@ if [ "$use_cache" -eq 0 ]; then
   TARGET_PASS=$(cat "$TARGET_PREFIX.pass")
   TARGET_FAIL=$(cat "$TARGET_PREFIX.fail")
 
-  if [ "$SOLO" -eq 0 ]; then
-    mkdir -p "$cache_dir"
-    printf '%s\t%s\n' "$TARGET_PASS" "$TARGET_FAIL" >"$cache_file"
-    cp "$TARGET_PREFIX.names" "$cache_names"
+  if [ "$SOLO" -eq 0 ] && cache_root_ready \
+    && { [ -d "$cache_dir" ] || mkdir -m 0700 "$cache_dir" 2>/dev/null; } \
+    && [ -O "$cache_dir" ]; then
+    printf '%s\t%s\n' "$TARGET_PASS" "$TARGET_FAIL" >"$cache_file" || true
+    cp "$TARGET_PREFIX.names" "$cache_names" || true
   fi
 
   git -C "$DIR" worktree remove --force "$TARGET_WT" >/dev/null 2>&1 || rm -rf "$TARGET_WT"

@@ -7,6 +7,8 @@
 #   - branch failure set matches target (BYTE-IDENTICAL), including inherited red
 #   - without --solo the verdict is UNVERIFIED (counts may still print)
 #   - forced contention with --solo yields CONTENDED, not a comparison verdict
+#   - an unlistable process table yields CONTENDED (unobservable is not quiet)
+#   - the target cache is reused only while its root stays private to the caller
 #   - project with no discoverable test command (unknown, exit 0)
 #   - .no-mistakes.yaml commands.test discovery, with and without python3 yaml
 #   - git state (HEAD / branch / porcelain) unchanged after a run
@@ -413,6 +415,73 @@ test_contended_solo_reports_contended() {
   pass "fm-honest-done.sh: contended solo reports CONTENDED not a verdict"
 }
 
+# A machine whose process table cannot be listed is unobservable, not quiet.
+test_unobservable_process_table_reports_contended() {
+  local case_dir fakebin out rc stub label
+  case_dir=$(make_repo blind-ps)
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$fakebin"
+  for label in silent-failure header-only; do
+    if [ "$label" = silent-failure ]; then
+      stub='exit 1'
+    else
+      stub='printf "  PID  PGID COMMAND\n"; exit 0'
+    fi
+    cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+$stub
+SH
+    chmod +x "$fakebin/ps"
+    out=$(
+      PATH="$fakebin:$PATH" "$HONEST" --solo --dir "$case_dir/wt" --target origin/main 2>/dev/null
+    ); rc=$?
+    expect_code 0 "$rc" "unobservable ps measure must still exit 0 ($label): $out"
+    assert_contains "$out" "failure set CONTENDED" \
+      "unlistable process table must be CONTENDED ($label), got: $out"
+    if printf '%s' "$out" | grep -qE 'failure set (BYTE-IDENTICAL|BRANCH-INTRODUCED)'; then
+      fail "unobservable process table must not emit a comparison verdict ($label): $out"
+    fi
+  done
+  pass "fm-honest-done.sh: unlistable process table reports CONTENDED not a verdict"
+}
+
+# The target cache is only trustworthy while its root stays private to us.
+test_cache_root_must_be_private_to_be_reused() {
+  local case_dir tmp croot out rc result names
+  case_dir=$(make_repo cache-perm)
+  tmp="$case_dir/tmp"
+  mkdir -p "$tmp"
+  croot="$tmp/fm-honest-done-cache"
+
+  out=$(
+    FM_HONEST_DONE_NO_CACHE=0 TMPDIR="$tmp" run_honest "$case_dir/wt" --target origin/main 2>/dev/null
+  ); rc=$?
+  expect_code 0 "$rc" "cache-populating measure failed: $out"
+  result=$(find "$croot" -name '*.result' 2>/dev/null | head -n 1)
+  [ -n "$result" ] || fail "non-solo run did not populate the target cache under $croot"
+  names="${result%.result}.names"
+
+  # Plant counts no run produced, then confirm a private root reuses them...
+  printf '99\t7\n' > "$result"
+  : > "$names"
+  out=$(
+    FM_HONEST_DONE_NO_CACHE=0 TMPDIR="$tmp" run_honest "$case_dir/wt" --target origin/main 2>/dev/null
+  ); rc=$?
+  expect_code 0 "$rc" "cached measure failed: $out"
+  assert_contains "$out" "99 pass / 7 fail on target" "private cache root should be reused, got: $out"
+
+  # ...and that a world-writable root is refused rather than trusted.
+  chmod 0777 "$croot"
+  out=$(
+    FM_HONEST_DONE_NO_CACHE=0 TMPDIR="$tmp" run_honest "$case_dir/wt" --target origin/main 2>/dev/null
+  ); rc=$?
+  expect_code 0 "$rc" "measure with untrusted cache root failed: $out"
+  assert_not_contains "$out" "99 pass / 7 fail on target" \
+    "world-writable cache root must not dictate target counts: $out"
+  assert_contains "$out" "3 pass / 0 fail on target" "target must be re-measured, got: $out"
+  pass "fm-honest-done.sh: world-writable cache root is refused, not trusted"
+}
+
 # firstmate itself: CI is the discoverable source when package/Makefile/nm miss.
 test_firstmate_repo_discovers_ci_not_unknown() {
   local out
@@ -449,4 +518,6 @@ test_no_mistakes_yaml_discovery
 test_ci_portable_lanes_discovery
 test_without_solo_reports_unverified
 test_contended_solo_reports_contended
+test_unobservable_process_table_reports_contended
+test_cache_root_must_be_private_to_be_reused
 test_firstmate_repo_discovers_ci_not_unknown
