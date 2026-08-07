@@ -208,6 +208,87 @@ MK
   pass "fm-honest-done.sh: discovers make test from Makefile"
 }
 
+# CI workflow discovery: portable fm-test-run lanes without package.json/Makefile.
+# Uses a tiny fake fm-test-run.sh so the test does not invoke the real suite.
+test_ci_portable_lanes_discovery() {
+  local case_dir out rc
+  case_dir=$(make_repo ci-lanes)
+  rm -f "$case_dir/wt/package.json"
+  mkdir -p "$case_dir/wt/.github/workflows" "$case_dir/wt/bin"
+  cat > "$case_dir/wt/.github/workflows/ci.yml" <<'YML'
+name: CI
+jobs:
+  lint:
+    steps:
+      - run: bin/fm-lint.sh
+  tests-portable-parallel-1:
+    steps:
+      - run: |
+          set -eu
+          bin/fm-test-run.sh --lane portable-parallel-1 \
+            --json "$RUNNER_TEMP/a.json"
+  tests-portable-parallel-2:
+    steps:
+      - run: bin/fm-test-run.sh --lane portable-parallel-2 --json x.json
+  tests-portable-serial:
+    steps:
+      - run: bin/fm-test-run.sh --lane portable-serial
+  tests-herdr:
+    steps:
+      - run: bin/fm-test-run.sh --family real-herdr-gated --fail-on-gate-skip 'herdr not found'
+  coverage:
+    steps:
+      - run: bin/fm-test-run.sh --check-coverage
+YML
+  # Fake runner: emit FM_TEST_SUMMARY like the real owner; one "script" per lane.
+  cat > "$case_dir/wt/bin/fm-test-run.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+lane=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --lane) lane=$2; shift 2 ;;
+    --lane=*) lane=${1#--lane=}; shift ;;
+    --json|--json=*) shift; [ "${1:-}" = "${1#--}" ] && shift || true ;;
+    *) shift ;;
+  esac
+done
+printf 'FM_TEST_BEGIN 2026-01-01T00:00:00Z tests/%s.test.sh family=x expected_gate_skip=none\n' "$lane"
+printf 'FM_TEST_END 2026-01-01T00:00:00Z tests/%s.test.sh exit=0 duration_ms=1 gate_skip=false\n' "$lane"
+printf 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=1\n' 
+exit 0
+SH
+  chmod +x "$case_dir/wt/bin/fm-test-run.sh"
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" commit -qm "ci-only suite discovery" >/dev/null
+
+  # Also put the same tree on origin/main so target resolves the fake runner.
+  git -C "$case_dir/wt" push -q origin HEAD:main
+
+  out=$(run_honest "$case_dir/wt" --target origin/main 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "CI discovery measurement failed: $out"
+  # Three lanes x 1 = 3 pass each side.
+  assert_contains "$out" "3 pass / 0 fail on branch" "CI lane composition counts wrong: $out"
+  assert_contains "$out" "3 pass / 0 fail on target" "CI target counts wrong: $out"
+  assert_contains "$out" "failure set BYTE-IDENTICAL" "CI path label wrong: $out"
+  pass "fm-honest-done.sh: discovers and composes CI portable fm-test-run lanes"
+}
+
+# firstmate itself: CI is the discoverable source when package/Makefile/nm miss.
+test_firstmate_repo_discovers_ci_not_unknown() {
+  local out
+  out=$("$HONEST" --dir "$ROOT" --discover-only 2>/dev/null) \
+    || fail "discover-only on firstmate worktree exited non-zero"
+  [ "$out" != "unknown" ] || fail "firstmate repo discovery returned unknown; CI should provide portable lanes"
+  assert_contains "$out" "portable-parallel-1" "firstmate CI discovery missing parallel-1: $out"
+  assert_contains "$out" "portable-parallel-2" "firstmate CI discovery missing parallel-2: $out"
+  assert_contains "$out" "portable-serial" "firstmate CI discovery missing serial: $out"
+  if printf '%s' "$out" | grep -q 'real-herdr'; then
+    fail "portable measurement must not pull herdr-gated lane: $out"
+  fi
+  pass "fm-honest-done.sh: firstmate repo discovers CI portable lanes (not unknown)"
+}
+
 test_script_parses() {
   local out rc
   out=$(bash -n "$HONEST" 2>&1); rc=$?
@@ -223,3 +304,5 @@ test_byte_identical_including_inherited_red
 test_git_state_untouched
 test_refuses_primary_checkout
 test_makefile_discovery
+test_ci_portable_lanes_discovery
+test_firstmate_repo_discovers_ci_not_unknown

@@ -12,18 +12,26 @@
 #
 # Usage:
 #   fm-honest-done.sh [--dir <path>] [--target <ref>]
+#   fm-honest-done.sh --discover-only [--dir <path>]
 #   fm-honest-done.sh -h | --help
 #
 # Options:
 #   --dir <path>     project worktree to measure (default: cwd)
 #   --target <ref>   merge-target ref (default: origin/<default-branch> if that
 #                    ref exists, else <default-branch>)
+#   --discover-only  print the discovered test command (or `unknown`) and exit 0
+#                    without running the suite
 #   -h, --help       print this header
 #
 # Discovery (first match wins; never invent a command):
 #   1. package.json scripts.test (non-empty string)
 #   2. Makefile or makefile target named exactly `test`
 #   3. .no-mistakes.yaml or .no-mistakes.yml commands.test (non-empty string)
+#   4. .github/workflows/*.{yml,yaml} suite run steps (see discover_from_ci)
+#      - bin/fm-test-run.sh --lane portable-* suite jobs are composed in CI order
+#      - other explicit suite runners found in run: steps (npm test, etc.)
+#      - --check-coverage, --list, --aggregate-json, and herdr-gated lanes are
+#        not suite measurement commands and are skipped
 #
 # Safety:
 #   - Refuses a primary checkout (git-dir == common-dir) unless
@@ -61,6 +69,7 @@ die() {
 
 DIR=
 TARGET_REF=
+DISCOVER_ONLY=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help)
@@ -83,6 +92,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --target=*)
       TARGET_REF=${1#--target=}
+      shift
+      ;;
+    --discover-only)
+      DISCOVER_ONLY=1
       shift
       ;;
     -*)
@@ -250,7 +263,138 @@ PY
     fi
   done
 
+  if cmd=$(discover_from_ci "$root"); then
+    printf '%s\n' "$cmd"
+    return 0
+  fi
+
   return 1
+}
+
+# Read suite commands declared in GitHub Actions workflows. Emits one command
+# string or returns 1. Never invents runners that are not present in a workflow
+# run step; only composes multiple portable fm-test-run lanes already declared.
+discover_from_ci() {
+  local root=$1
+  local wf="$root/.github/workflows"
+  [ -d "$wf" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+
+  python3 - "$wf" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+wf = Path(sys.argv[1])
+blobs = []
+for path in sorted(wf.glob("*.yml")) + sorted(wf.glob("*.yaml")):
+    try:
+        blobs.append(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        continue
+if not blobs:
+    sys.exit(1)
+
+# Collapse YAML line continuations so multi-line run blocks become one line.
+blob = re.sub(r"\\\r?\n[ \t]*", " ", "\n".join(blobs))
+
+# --- Firstmate / fm-test-run suite jobs ------------------------------------
+# Keep real suite invocations; drop inventory/coverage/list/aggregate helpers
+# and the real-Herdr lane (needs a pinned herdr install the portable measure
+# does not own).
+portable_order = {
+    "portable-parallel-1": 0,
+    "portable-parallel-2": 1,
+    "portable-serial": 2,
+}
+portable = {}  # lane -> command
+fm_all = None
+fm_other = []
+
+# Match fm-test-run anywhere in a run step (multi-line body, or `run: bin/...`
+# on one line). Do not require start-of-line; YAML often has `- run: ` prefix.
+for m in re.finditer(r"((?:\./)?bin/fm-test-run\.sh\b[^\n#]*)", blob):
+    raw = m.group(1).strip()
+    # Drop artifact flags and trailing shell noise; keep suite selectors.
+    raw = re.sub(r"\s+--json(?:=|\s+)\S+", "", raw)
+    raw = re.sub(r'\s+--json\s+"[^"]*"', "", raw)
+    raw = re.sub(r"\s+--json\s+'[^']*'", "", raw)
+    raw = re.sub(r"\s{2,}", " ", raw).strip().rstrip(";|&")
+    if re.search(r"--check-coverage\b|--list(?:-|\b)|--aggregate-json\b|--help\b", raw):
+        continue
+    if re.search(r"--family\s+real-herdr|real-herdr-gated", raw):
+        continue
+    lane_m = re.search(r"--lane\s+(\S+)", raw)
+    if lane_m:
+        lane = lane_m.group(1)
+        # Prefer the portable partition CI uses for broad regression.
+        if lane in portable_order:
+            portable[lane] = f"bin/fm-test-run.sh --lane {lane}"
+        else:
+            fm_other.append(f"bin/fm-test-run.sh --lane {lane}")
+        continue
+    if re.search(r"--all\b", raw):
+        fm_all = "bin/fm-test-run.sh --all"
+        continue
+    if re.search(r"--family\b|--proven-isolated\b|--changed\b", raw):
+        # Normalize to bin/ path form for a stable command string.
+        rest = raw.split("fm-test-run.sh", 1)[1].strip()
+        fm_other.append(f"bin/fm-test-run.sh {rest}".rstrip())
+        continue
+
+if portable:
+    # Compose every portable lane CI already declares, in CI partition order.
+    # Use ';' so a red first lane still runs the rest (counts stay complete);
+    # overall exit is non-zero if any lane failed.
+    parts = [portable[k] for k in sorted(portable, key=lambda x: portable_order[x])]
+    body = "; ".join(f"{p} || r=1" for p in parts)
+    print(f"r=0; {body}; exit $r")
+    sys.exit(0)
+if fm_all:
+    print(fm_all)
+    sys.exit(0)
+if fm_other:
+    # Unique, preserve order.
+    seen = []
+    for c in fm_other:
+        if c not in seen:
+            seen.append(c)
+    if len(seen) == 1:
+        print(seen[0])
+    else:
+        body = "; ".join(f"{p} || r=1" for p in seen)
+        print(f"r=0; {body}; exit $r")
+    sys.exit(0)
+
+# --- Generic suite runners declared in CI run steps ------------------------
+# Only exact common suite entrypoints that appear in the workflow text.
+generics = []
+patterns = [
+    r"\bnpm\s+test\b(?:\s+--[^\n#]*)?",
+    r"\bnpm\s+run\s+test\b(?:\s+--[^\n#]*)?",
+    r"\bpnpm\s+(?:run\s+)?test\b(?:\s+--[^\n#]*)?",
+    r"\byarn\s+(?:run\s+)?test\b(?:\s+--[^\n#]*)?",
+    r"\bbun\s+test\b(?:\s+[^\n#]*)?",
+    r"\bmake\s+test\b",
+    r"\bpytest\b[^\n#]*",
+    r"\bcargo\s+test\b[^\n#]*",
+    r"\bgo\s+test\b[^\n#]*",
+]
+for pat in patterns:
+    for m in re.finditer(pat, blob):
+        g = re.sub(r"\s{2,}", " ", m.group(0).strip())
+        # Trim trailing YAML / comment noise
+        g = g.split(" #")[0].strip().rstrip("|").strip()
+        if g and g not in generics:
+            generics.append(g)
+
+if generics:
+    # One clear CI suite command; if several distinct, prefer the first.
+    print(generics[0])
+    sys.exit(0)
+
+sys.exit(1)
+PY
 }
 
 # Parse suite output into pass count, fail count, and a sorted unique failure
@@ -281,14 +425,21 @@ parse_suite_output() {
     fi
   fi
 
-  # Firstmate suite runner markers.
+  # Firstmate suite runner markers. Sum every FM_TEST_SUMMARY so multi-lane
+  # CI compositions (portable-parallel-1 + 2 + serial) count as one suite.
   if grep -Eq '^FM_TEST_SUMMARY total=' "$log_file" 2>/dev/null; then
-    local line total failed
-    line=$(grep -E '^FM_TEST_SUMMARY total=' "$log_file" | tail -1)
-    total=$(printf '%s' "$line" | sed -n 's/.*total=\([0-9][0-9]*\).*/\1/p')
-    failed=$(printf '%s' "$line" | sed -n 's/.*failed=\([0-9][0-9]*\).*/\1/p')
-    total=${total:-0}
-    failed=${failed:-0}
+    local total failed
+    total=0
+    failed=0
+    while IFS= read -r line; do
+      local t f
+      t=$(printf '%s' "$line" | sed -n 's/.*total=\([0-9][0-9]*\).*/\1/p')
+      f=$(printf '%s' "$line" | sed -n 's/.*failed=\([0-9][0-9]*\).*/\1/p')
+      t=${t:-0}
+      f=${f:-0}
+      total=$((total + t))
+      failed=$((failed + f))
+    done < <(grep -E '^FM_TEST_SUMMARY total=' "$log_file" || true)
     pass=$((total - failed))
     [ "$pass" -ge 0 ] || pass=0
     fail=$failed
@@ -415,6 +566,11 @@ trap cleanup EXIT
 TEST_CMD=
 if ! TEST_CMD=$(discover_test_command "$DIR"); then
   printf 'unknown\n'
+  exit 0
+fi
+
+if [ "$DISCOVER_ONLY" -eq 1 ]; then
+  printf '%s\n' "$TEST_CMD"
   exit 0
 fi
 
