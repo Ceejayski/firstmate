@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--context-pack [recipe]]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -26,6 +26,10 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --context-pack links data/<task-id>/context-pack.md as the worker's first
+#   read. If that file is absent, it is generated with bin/fm-context-pack.sh;
+#   an optional recipe name overrides recipe inference. An existing pack is
+#   linked without being overwritten.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
@@ -84,15 +88,29 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+CONTEXT_PACK=0
+CONTEXT_RECIPE=
 POS=()
-for a in "$@"; do
-  case "$a" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
-    *) POS+=("$a") ;;
+    --context-pack)
+      CONTEXT_PACK=1
+      if [ "$#" -gt 1 ] && [[ "$2" != --* ]]; then
+        CONTEXT_RECIPE=$2
+        shift
+      fi
+      ;;
+    --context-pack=*)
+      CONTEXT_PACK=1
+      CONTEXT_RECIPE=${1#--context-pack=}
+      ;;
+    *) POS+=("$1") ;;
   esac
+  shift
 done
 ID=${POS[0]}
 
@@ -103,6 +121,11 @@ fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
+  exit 1
+fi
+
+if [ "$CONTEXT_PACK" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --context-pack applies only to crewmate ship or scout briefs" >&2
   exit 1
 fi
 
@@ -218,6 +241,25 @@ fi
 
 REPO=${POS[1]}
 
+CONTEXT_SECTION=
+if [ "$CONTEXT_PACK" -eq 1 ]; then
+  CONTEXT_PACK_PATH="$DATA/$ID/context-pack.md"
+  if [ ! -f "$CONTEXT_PACK_PATH" ]; then
+    CONTEXT_ARGS=(--task "$ID" --repo "$REPO" --kind "$KIND" -o "$CONTEXT_PACK_PATH")
+    if [ -n "$CONTEXT_RECIPE" ]; then
+      CONTEXT_ARGS+=(--recipe "$CONTEXT_RECIPE")
+    fi
+    FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      "$FM_ROOT/bin/fm-context-pack.sh" "${CONTEXT_ARGS[@]}" >/dev/null
+  fi
+  IFS= read -r -d '' CONTEXT_SECTION <<EOF || :
+# Context pack
+Read this task context first: \`$CONTEXT_PACK_PATH\`.
+Respect its line caps and do-not-read list instead of expanding the brief with full standing-memory files.
+
+EOF
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -253,6 +295,7 @@ if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
+$CONTEXT_SECTION
 # Task
 {TASK}
 
@@ -371,6 +414,7 @@ esac
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
+$CONTEXT_SECTION
 # Task
 {TASK}
 
