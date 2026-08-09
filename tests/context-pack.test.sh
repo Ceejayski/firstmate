@@ -31,16 +31,30 @@ max_reports: 1
 max_docs: 1
 EOF
 
+cat > "$GRAPH_DIR/recipes/tiny-pack.yaml" <<'EOF'
+name: tiny-pack
+max_tokens: 50
+always:
+  - doc:oversized
+  - doc:fits
+max_reports: 1
+max_docs: 1
+EOF
+
 cat > "$GRAPH_DIR/graph.jsonl" <<'EOF'
 {"op":"node","id":"skill:firstmate-coding","type":"skill","path":".agents/skills/firstmate-coding-guidelines/SKILL.md","repo":"firstmate","summary":"Tracked-material guidance","priority":90}
 {"op":"node","id":"rule:uncapped-private-memory","type":"rule","path":"data/captain.md","repo":"-","summary":"One live rule only","priority":100}
 {"op":"node","id":"rail:expected-firstmate","type":"rail","path":"data/expected-rail.md","repo":"firstmate","summary":"Expected task rail","max_lines":30,"priority":80}
 {"op":"node","id":"task:known-task","type":"task","path":"data/known-task/brief.md","repo":"firstmate","summary":"Known task","priority":50}
+{"op":"node","id":"doc:oversized","type":"doc","path":"data/oversized.md","repo":"firstmate","summary":"Oversized first node","priority":100}
+{"op":"node","id":"doc:fits","type":"doc","path":"data/fits.md","repo":"firstmate","summary":"Node within budget","priority":90,"max_lines":1}
 {"op":"edge","from":"task:known-task","rel":"depends-on","to":"rail:expected-firstmate"}
 EOF
 
 printf '%s\n' '# Captain memory fixture' > "$PACK_HOME/data/captain.md"
 printf '%s\n' '# Expected rail fixture' > "$PACK_HOME/data/expected-rail.md"
+printf '%0240d\n' 0 > "$PACK_HOME/data/oversized.md"
+printf '%s\n' 'small' > "$PACK_HOME/data/fits.md"
 
 test_lists_recipes() {
   local output
@@ -64,6 +78,19 @@ test_known_task_pack() {
     fail "pack requested an unbounded captain.md read"
   fi
   pass "fm-context-pack: known task includes its rail without full captain memory"
+}
+
+test_oversized_first_node_is_trimmed() {
+  local output
+  output=$(FM_HOME="$PACK_HOME" "$ROOT/bin/fm-context-pack.sh" --recipe tiny-pack) \
+    || fail "oversized-node pack should trim cleanly"
+  assert_contains "$output" "pack uses about **40**" "pack exceeded its 50-token ceiling"
+  assert_contains "$output" '1. **doc:fits**' "pack omitted the lower-priority node that fits"
+  assert_contains "$output" '- `doc:oversized`' "pack did not report the oversized first node as trimmed"
+  if printf '%s\n' "$output" | grep -F '**doc:oversized**' >/dev/null; then
+    fail "oversized first node remained in the must-read list"
+  fi
+  pass "fm-context-pack: oversized first node is trimmed to preserve the budget ceiling"
 }
 
 test_output_and_brief_hook() {
@@ -100,5 +127,6 @@ test_skill_triggers_are_registered_once() {
 
 test_lists_recipes
 test_known_task_pack
+test_oversized_first_node_is_trimmed
 test_output_and_brief_hook
 test_skill_triggers_are_registered_once

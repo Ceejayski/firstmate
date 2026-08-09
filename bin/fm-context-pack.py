@@ -224,7 +224,7 @@ def build_pack(task_id: str | None, recipe: dict, nodes: dict[str, dict], edges:
     trimmed: list[str] = []
     for node in selected:
         cost = node_cost(node)
-        if total + cost > max_tokens and kept:
+        if total + cost > max_tokens:
             trimmed.append(node.get("id", "?"))
             continue
         kept.append(node)
