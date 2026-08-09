@@ -86,7 +86,7 @@ test_oversized_first_node_is_trimmed() {
     || fail "oversized-node pack should trim cleanly"
   assert_contains "$output" "pack uses about **40**" "pack exceeded its 50-token ceiling"
   assert_contains "$output" '1. **doc:fits**' "pack omitted the lower-priority node that fits"
-  assert_contains "$output" '- `doc:oversized`' "pack did not report the oversized first node as trimmed"
+  assert_contains "$output" "- \`doc:oversized\`" "pack did not report the oversized first node as trimmed"
   if printf '%s\n' "$output" | grep -F '**doc:oversized**' >/dev/null; then
     fail "oversized first node remained in the must-read list"
   fi
