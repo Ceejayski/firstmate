@@ -138,6 +138,21 @@ test_classifier_primitives() {
     && fail "working: predecessor prose wrongly recognized as captain-relevant"
   status_is_captain_relevant "working: PR ready checks green merged ready in branch" \
     && fail "working: free-text tokens wrongly recognized as captain-relevant"
+  # Auto-pipeline verbs: leading form wakes firstmate; prose inside working:/paused: does not.
+  status_is_captain_relevant "ready-for-review: pipeline stage complete" \
+    || fail "ready-for-review: not recognized as captain-relevant"
+  status_is_captain_relevant "ready-for-merge: checks green" \
+    || fail "ready-for-merge: not recognized as captain-relevant"
+  status_is_captain_relevant "verdict: approved" \
+    || fail "verdict: not recognized as captain-relevant"
+  status_is_captain_relevant "returned: needs more work" \
+    || fail "returned: not recognized as captain-relevant"
+  status_is_captain_relevant "working: waiting for ready-for-review: from auto pipeline" \
+    && fail "working: ready-for-review: prose wrongly recognized as captain-relevant"
+  status_is_captain_relevant "working: saw ready-for-merge: and verdict: and returned: in log" \
+    && fail "working: pipeline-verb prose wrongly recognized as captain-relevant"
+  status_is_captain_relevant "paused: ready-for-review: blocked on external" \
+    && fail "paused: ready-for-review: prose wrongly recognized as captain-relevant"
   status_is_captain_relevant "done: PR https://x/pull/76 checks green" \
     || fail "genuine done: checks green not captain-relevant"
   status_is_terminal_verb "done: PR https://x/pull/76 checks green" \
