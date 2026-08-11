@@ -47,7 +47,7 @@ test_tick_not_ready_done_without_pr() {
 }
 
 test_tick_sweep_expired_claim() {
-  # shellcheck source=bin/fm-claim-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-claim-lib.sh"
   fm_ready_enqueue "$PIPELINE" "tick-3" "code-review" "$SHA40"
   fm_claim_acquire "$PIPELINE" "tick-3" "old-rev" "$SHA40" "code-review" 1
@@ -60,7 +60,7 @@ test_tick_sweep_expired_claim() {
 }
 
 test_tick_applies_green_verdict() {
-  # shellcheck source=bin/fm-claim-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-claim-lib.sh"
   fm_write_meta "$STATE/tick-4.meta" "kind=ship" "implementer=impl" "harness=qwen"
   fm_ready_enqueue "$PIPELINE" "tick-4" "code-review" "$SHA40" "code-review,qa" ""
@@ -76,7 +76,7 @@ test_tick_applies_green_verdict() {
 }
 
 test_tick_blocked_claimer() {
-  # shellcheck source=bin/fm-claim-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-claim-lib.sh"
   fm_write_meta "$STATE/tick-5.meta" "kind=ship"
   : > "$STATE/tick-5.status"

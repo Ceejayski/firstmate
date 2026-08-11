@@ -11,7 +11,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# shellcheck source=bin/fm-verdict-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-verdict-lib.sh"
 
 # --- verdict construction ----------------------------------------------------

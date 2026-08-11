@@ -13,7 +13,7 @@ FM_HOME=$(fm_test_tmproot fm-merge-gate-tests)
 STATE="$FM_HOME/state"
 mkdir -p "$STATE"
 
-# shellcheck source=bin/fm-merge-gate.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-merge-gate.sh"
 
 SHA_A="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

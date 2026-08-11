@@ -18,7 +18,7 @@ set -u
 export FM_HOME
 FM_HOME=$(fm_test_tmproot fm-pipeline-lib-tests)
 
-# shellcheck source=bin/fm-pipeline-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-pipeline-lib.sh"
 
 Q="$FM_HOME/pipeline"

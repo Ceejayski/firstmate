@@ -18,7 +18,7 @@ export FM_STATE_OVERRIDE="$STATE"
 export FM_PIPELINE_DIR_OVERRIDE="$PIPELINE"
 export FM_HOME
 
-# shellcheck source=bin/fm-ready-check.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-ready-check.sh"
 
 SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
