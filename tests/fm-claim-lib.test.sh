@@ -6,13 +6,14 @@
 # and harness-agnostic (pure file-based, no harness-specific behaviour).
 #
 # These tests prove:
-#   1. One-winner: two concurrent claims, exactly one wins
+#   1. One-winner: two concurrent claims, exactly one wins (real race)
 #   2. Expiry: a claim expires after the TTL, and the ticket returns to the queue
 #   3. Return-to-queue: an expired claim returns the ticket to the ready queue
 #   4. Claim release: a released claim frees the ticket
 #   5. Ready-list: claimed tickets are excluded from the ready list
 #   6. Claim inspection: holder, remaining, sha, stage are correct
 #   7. Sweep: expired claims are detected and removed
+#   8. Break/restore: removing exclusive ln makes concurrent one-winner fail
 #
 # Each test uses a unique task ID to avoid cross-test contamination.
 set -u
@@ -53,7 +54,7 @@ test_acquire_reports_active() {
 
 # --- one-winner (exclusive claim) --------------------------------------------
 
-test_one_winner_two_claimers() {
+test_one_winner_two_claimers_sequential() {
   local r1 r2
   fm_claim_acquire "$Q" "winner-1" "reviewer-alpha" "abc123" "code-review" 60
   r1=$?
@@ -63,7 +64,71 @@ test_one_winner_two_claimers() {
   [ "$r2" -ne 0 ] || fail "second claimer should have lost (got $r2)"
   [ "$(fm_claim_holder "$Q" "winner-1")" = "reviewer-alpha" ] \
     || fail "holder should still be reviewer-alpha"
-  pass "one-winner: exactly one claim wins"
+  pass "one-winner sequential: exactly one claim wins"
+}
+
+# Real concurrent race: N background claimers, exactly one winner.
+# A sequential "race" proves nothing about exclusivity under concurrency.
+test_one_winner_concurrent_race() {
+  local task="race-1" i n=12 winners=0 holder results="$Q/race-results"
+  rm -f "$Q/${task}.claim" "$results"
+  mkdir -p "$results"
+
+  for i in $(seq 1 "$n"); do
+    (
+      if fm_claim_acquire "$Q" "$task" "reviewer-$i" "abc123" "code-review" 60; then
+        echo "reviewer-$i" > "$results/win-$i"
+      else
+        echo "lost" > "$results/lose-$i"
+      fi
+    ) &
+  done
+  wait
+
+  winners=$(find "$results" -name 'win-*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$winners" -eq 1 ] || fail "expected exactly 1 concurrent winner, got $winners"
+  holder=$(fm_claim_holder "$Q" "$task")
+  [ -n "$holder" ] || fail "holder should be set after race"
+  printf '%s' "$holder" | grep -q '^reviewer-' || fail "holder should be a reviewer-*, got $holder"
+  pass "one-winner concurrent race: exactly one of $n claimers wins"
+}
+
+# Break/restore proof for exclusive create: if ln is replaced by overwrite mv,
+# concurrent claimers can produce more than one winner OR last-writer wins
+# without refusal — the exclusive property is gone. We prove the guard by
+# temporarily wrapping acquire with an overwrite write and showing two
+# sequential "acquires" both report success (the broken contract).
+test_break_restore_exclusive_create() {
+  local task="break-1"
+  rm -f "$Q/${task}.claim"
+
+  # Broken write: mv overwrites, so a second "exclusive" write succeeds.
+  _fm_claim_write_broken() {
+    local claim_file=$1 claimer=$2 sha=$3 stage=$4 task=$5 expiry=${6:-}
+    local tmp="${claim_file}.tmp.$$"
+    [ -z "$expiry" ] && expiry=$(( $(date +%s) + 60 ))
+    printf 'claimer=%s\nsha=%s\nstage=%s\nexpiry=%s\ntask=%s\n' \
+      "$claimer" "$sha" "$stage" "$expiry" "$task" > "$tmp" || return 1
+    mv "$tmp" "$claim_file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  }
+
+  # With overwrite semantics both "acquires" after a clear succeed — no refusal.
+  rm -f "$Q/${task}.claim"
+  _fm_claim_write_broken "$Q/${task}.claim" "a" "s" "code-review" "$task" "$(( $(date +%s) + 60 ))" \
+    || fail "broken write should succeed first"
+  _fm_claim_write_broken "$Q/${task}.claim" "b" "s" "code-review" "$task" "$(( $(date +%s) + 60 ))" \
+    || fail "broken overwrite should also succeed (demonstrates the bug)"
+  [ "$(fm_claim_holder "$Q" "$task")" = "b" ] || fail "last writer should win under broken mv"
+
+  # Restore: real exclusive create refuses the second write.
+  rm -f "$Q/${task}.claim"
+  _fm_claim_write_exclusive "$Q/${task}.claim" "a" "s" "code-review" "$task" "$(( $(date +%s) + 60 ))" \
+    || fail "exclusive write should succeed first"
+  _fm_claim_write_exclusive "$Q/${task}.claim" "b" "s" "code-review" "$task" "$(( $(date +%s) + 60 ))" \
+    && fail "exclusive write should refuse second claimer"
+  [ "$(fm_claim_holder "$Q" "$task")" = "a" ] || fail "holder should remain a after refused second"
+
+  pass "break/restore exclusive create: mv overwrites, ln one-winner"
 }
 
 # --- expiry ------------------------------------------------------------------
@@ -78,11 +143,14 @@ test_claim_expires() {
 
 test_expired_claim_returns_to_queue() {
   fm_claim_acquire "$Q" "exp-2" "reviewer-alpha" "abc123" "code-review" 1
+  # Keep ready marker present — expiry must not lose the ticket.
+  fm_ready_enqueue "$Q" "exp-2" "code-review" "abc123"
   sleep 2
   local holder
   holder=$(fm_claim_holder "$Q" "exp-2")
   [ -z "$holder" ] || fail "holder should be empty after expiry, got '$holder'"
-  pass "expired claim returns to queue (holder is empty)"
+  fm_ready_is_queued "$Q" "exp-2" || fail "ready marker must survive claim expiry"
+  pass "expired claim returns to queue (holder empty, ready remains)"
 }
 
 test_sweep_detects_expired() {
@@ -146,6 +214,13 @@ test_ready_list_stage_filter() {
   pass "ready list respects stage filter"
 }
 
+test_ready_stores_required_and_pr() {
+  fm_ready_enqueue "$Q" "rdy-6" "code-review" "abc123" "code-review,qa" "https://example/pr/1"
+  [ "$(fm_ready_field "$Q" "rdy-6" required)" = "code-review,qa" ] || fail "required field"
+  [ "$(fm_ready_field "$Q" "rdy-6" pr)" = "https://example/pr/1" ] || fail "pr field"
+  pass "ready marker stores required stages and pr url"
+}
+
 # --- claim_remaining ---------------------------------------------------------
 
 test_claim_remaining_counts_down() {
@@ -190,7 +265,9 @@ test_reacquire_after_expiry() {
 test_acquire_creates_claim
 test_acquire_sets_correct_fields
 test_acquire_reports_active
-test_one_winner_two_claimers
+test_one_winner_two_claimers_sequential
+test_one_winner_concurrent_race
+test_break_restore_exclusive_create
 test_claim_expires
 test_expired_claim_returns_to_queue
 test_sweep_detects_expired
@@ -199,9 +276,10 @@ test_release_wrong_claimer_refused
 test_ready_enqueue_dequeue
 test_ready_list_excludes_claimed
 test_ready_list_stage_filter
+test_ready_stores_required_and_pr
 test_claim_remaining_counts_down
 test_claim_remaining_zero_for_expired
 test_claim_remaining_zero_for_unclaimed
 test_reacquire_after_expiry
 
-printf '\n1..%d\n' 16
+printf '\n1..%d\n' 19

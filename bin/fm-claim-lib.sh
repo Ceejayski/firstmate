@@ -6,8 +6,10 @@
 # mid-review must not park the ticket forever). An expired claim RETURNS the
 # ticket to the ready queue, never loses it.
 #
-# Harness-agnostic by design: claims are file-based, atomically acquired via `mv`
-# (POSIX, same-filesystem guarantee), and the TTL is wall-clock seconds. No
+# Harness-agnostic by design: claims are file-based. Exclusive create uses a
+# hard link (`ln` fails if the destination already exists), which is the POSIX
+# one-winner primitive under concurrent claimers. Plain `mv` overwrites and is
+# therefore NOT used for acquisition. The TTL is wall-clock seconds. No
 # harness-specific behaviour, no harness-specific output, no dependency on any
 # agent's turn-end signalling.
 #
@@ -17,6 +19,12 @@
 #   stage=<review-stage>
 #   expiry=<epoch-seconds>
 #   task=<task-id>
+#
+# Ready marker format (one line per field):
+#   stage=<review-stage>
+#   sha=<commit-sha>
+#   required=<comma-separated stages>   (optional; default full stage list)
+#   pr=<pr-url>                         (optional; third-party locator)
 #
 # Sourced by pipeline scripts; never executed directly. Every function is a pure
 # read or a single atomic write; no globals, no side effects beyond the claim file.
@@ -29,20 +37,29 @@ FM_CLAIM_TTL_DEFAULT=${FM_CLAIM_TTL_DEFAULT:-1800}
 
 # --- claim file format --------------------------------------------------------
 
-# Write a claim file atomically: write to a temp file, then mv into place.
+# Write a claim file with exclusive create: write to a temp file, then hard-link
+# into place. `ln` fails if the destination already exists, so concurrent
+# claimers yield exactly one winner. Overwrite-style `mv` is deliberately not
+# used here.
 # $1: claim file path
 # $2: claimer agent id
 # $3: commit SHA the claim is bound to
 # $4: review stage (code-review, qa, security-review)
 # $5: task id
 # $6: expiry epoch seconds (optional; defaults to now + FM_CLAIM_TTL_DEFAULT)
-_fm_claim_write() {
+# Returns 0 on exclusive create success, 1 if another claimer already holds it.
+_fm_claim_write_exclusive() {
   local claim_file=$1 claimer=$2 sha=$3 stage=$4 task=$5 expiry=${6:-}
-  local tmp="${claim_file}.tmp.$$"
+  local tmp="${claim_file}.tmp.$$.$RANDOM"
   [ -z "$expiry" ] && expiry=$(( $(date +%s) + FM_CLAIM_TTL_DEFAULT ))
   printf 'claimer=%s\nsha=%s\nstage=%s\nexpiry=%s\ntask=%s\n' \
     "$claimer" "$sha" "$stage" "$expiry" "$task" > "$tmp" || return 1
-  mv "$tmp" "$claim_file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  if ln "$tmp" "$claim_file" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 # Parse a single field from a claim file.
@@ -56,8 +73,9 @@ _fm_claim_field() {
 
 # --- claim acquisition --------------------------------------------------------
 
-# Try to acquire a claim on a ticket. Atomic: if the claim file does not exist
-# or the existing claim has expired, writes a new claim and returns 0.
+# Try to acquire a claim on a ticket. Exclusive under concurrency: if the claim
+# file does not exist (or the existing claim has expired and is removed), an
+# exclusive hard-link create wins for exactly one claimer.
 # If a valid unexpired claim exists, returns 1.
 # $1: queue directory (where claim files live)
 # $2: task id
@@ -76,10 +94,12 @@ fm_claim_acquire() {
     if [ -n "$existing_expiry" ] && [ "$existing_expiry" -gt "$now" ] 2>/dev/null; then
       return 1
     fi
+    # Expired claim: remove so the ticket returns to the queue, then race the
+    # exclusive create. If another claimer already re-acquired, ln fails.
     rm -f "$claim_file"
   fi
 
-  _fm_claim_write "$claim_file" "$claimer" "$sha" "$stage" "$task" \
+  _fm_claim_write_exclusive "$claim_file" "$claimer" "$sha" "$stage" "$task" \
     "$(( $(date +%s) + ttl ))"
 }
 
@@ -185,7 +205,7 @@ fm_claim_is_active() {
 
 # Sweep the queue directory for expired claims. For each expired claim, print
 # "EXPIRED <task-id> <stage>" and remove the claim file so the ticket is
-# automatically returned to the ready queue.
+# automatically returned to the ready queue (never lost).
 # $1: queue directory
 fm_claim_sweep() {
   local queue_dir=$1 claim_file expiry now task
@@ -208,10 +228,28 @@ fm_claim_sweep() {
 # $2: task id
 # $3: stage (code-review, qa, security-review)
 # $4: commit SHA (optional)
+# $5: required stages comma-list (optional)
+# $6: PR URL (optional; third-party locator a reviewer can reach)
 fm_ready_enqueue() {
-  local queue_dir=$1 task=$2 stage=$3 sha=${4:-}
+  local queue_dir=$1 task=$2 stage=$3 sha=${4:-} required=${5:-} pr=${6:-}
   local ready_file="$queue_dir/${task}.ready"
-  printf 'stage=%s\nsha=%s\n' "$stage" "$sha" > "$ready_file"
+  {
+    printf 'stage=%s\n' "$stage"
+    printf 'sha=%s\n' "$sha"
+    [ -n "$required" ] && printf 'required=%s\n' "$required"
+    [ -n "$pr" ] && printf 'pr=%s\n' "$pr"
+  } > "$ready_file"
+}
+
+# Read a field from a ready marker.
+# $1: queue directory
+# $2: task id
+# $3: field name
+fm_ready_field() {
+  local queue_dir=$1 task=$2 field=$3
+  local ready_file="$queue_dir/${task}.ready"
+  [ -f "$ready_file" ] || return 1
+  grep "^${field}=" "$ready_file" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
 # Remove a ticket from the ready queue (after it's claimed or advanced).
