@@ -23,7 +23,7 @@ DISPATCH="$ROOT/bin/fm-pipeline-dispatch.sh"
 test_prepare_claims_and_composes_brief() {
   fm_write_meta "$STATE/d-1.meta" "kind=ship" "implementer=d-1" "harness=qwen" \
     "project=$ROOT" "pr=https://github.com/o/r/pull/20" "pr_head=$SHA40" \
-    "changed_paths=bin/x.sh"
+    "changed_paths=bin/x.sh" "required_stages=code-review,qa" "changed_paths_sha=$SHA40"
   : > "$STATE/d-1.status"
   fm_ready_enqueue "$PIPELINE" "d-1" "code-review" "$SHA40" "code-review,qa" \
     "https://github.com/o/r/pull/20"
@@ -36,6 +36,27 @@ test_prepare_claims_and_composes_brief() {
   grep -q "review-dispatched: code-review" "$STATE/d-1.status" \
     || fail "status missing review-dispatched"
   pass "prepare claims ticket and composes standing brief"
+}
+
+test_blocked_harness_releases_claim() {
+  fm_write_meta "$STATE/d-harn.meta" "kind=ship" "implementer=d-harn" \
+    "project=$ROOT" "pr=https://github.com/o/r/pull/23" "pr_head=$SHA40" \
+    "changed_paths=bin/x.sh" "required_stages=code-review" "changed_paths_sha=$SHA40"
+  : > "$STATE/d-harn.status"
+  fm_ready_enqueue "$PIPELINE" "d-harn" "code-review" "$SHA40" "code-review" \
+    "https://github.com/o/r/pull/23"
+
+  # Force spawn path with no harness configured.
+  unset FM_PIPELINE_REVIEW_HARNESS
+  rm -f "$FM_HOME/config/crew-harness"
+  out=$("$DISPATCH" --state "$STATE" --pipeline-dir "$PIPELINE" --spawn --stage code-review)
+  printf '%s' "$out" | grep -q "BLOCKED-HARNESS d-harn" \
+    || fail "missing harness must block: $out"
+  grep -q "blocked: pipeline dispatch needs a review harness" "$STATE/d-harn.status" \
+    || fail "blocked must be visible"
+  fm_claim_is_active "$PIPELINE" "d-harn" && fail "claim must be released on BLOCKED-HARNESS"
+  [ -f "$PIPELINE/d-harn.ready" ] || fail "ready marker must remain (ticket not lost)"
+  pass "BLOCKED-HARNESS releases claim; ticket stays queued"
 }
 
 test_self_review_blocked_visible() {
@@ -68,5 +89,6 @@ test_missing_implementer_blocked() {
 test_prepare_claims_and_composes_brief
 test_self_review_blocked_visible
 test_missing_implementer_blocked
+test_blocked_harness_releases_claim
 
-printf '\n1..%d\n' 3
+printf '\n1..%d\n' 4

@@ -66,15 +66,18 @@ fm_pipeline_init() {
 #   code-review
 #   code-review,qa
 #   code-review,qa,security-review
-# $1: newline- or space-separated changed paths (empty → code-review,qa default)
+# $1: newline- or space-separated changed paths
+# Fail closed: empty or unknown paths refuse. A missing input must never become
+# a confident generic code-review,qa answer — that made security-review
+# unreachable in production. Callers that observed a successful zero-file diff
+# set required_stages=code-review explicitly rather than calling this with "".
 fm_pipeline_required_stages() {
   local paths=${1:-}
   local need_qa=0 need_sec=0 path lower any_path=0 non_docs=0
 
   if [ -z "$paths" ]; then
-    # Unknown surface: require code-review + qa, not security without evidence.
-    printf 'code-review,qa'
-    return 0
+    echo "required_stages: changed paths unknown — refuse generic default" >&2
+    return 1
   fi
 
   # shellcheck disable=SC2086
@@ -93,8 +96,8 @@ fm_pipeline_required_stages() {
   done
 
   if [ "$any_path" -eq 0 ]; then
-    printf 'code-review,qa'
-    return 0
+    echo "required_stages: changed paths unknown — refuse generic default" >&2
+    return 1
   fi
 
   if [ "$need_sec" -eq 1 ]; then
@@ -107,6 +110,155 @@ fm_pipeline_required_stages() {
   fi
   # Pure docs/copy: code-review only.
   printf 'code-review'
+}
+
+# Resolve the merge-base side for a real branch diff.
+# Prefers origin/<default>, then local main/master.
+# $1: git directory (worktree or project clone)
+# Prints a ref (e.g. origin/main). Returns 1 if none resolve.
+fm_pipeline_default_base_ref() {
+  local gitdir=$1
+  local ref branch
+
+  [ -d "$gitdir" ] || return 1
+  ref=$(git -C "$gitdir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ] && git -C "$gitdir" rev-parse --verify --quiet "${ref}^{commit}" >/dev/null; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$gitdir" rev-parse --verify --quiet "refs/remotes/origin/${branch}^{commit}" >/dev/null; then
+      printf 'origin/%s' "$branch"
+      return 0
+    fi
+    if git -C "$gitdir" rev-parse --verify --quiet "refs/heads/${branch}^{commit}" >/dev/null; then
+      printf '%s' "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Compute changed paths from a real git diff: base...head (merge-base triple-dot).
+# Does not trust worker self-report. Prints space-separated paths (may be empty
+# when the diff is empty but still resolvable). Returns 1 when the diff cannot
+# be determined at all.
+# $1: git directory
+# $2: head SHA or ref (the PR tip)
+# $3: optional base ref (default: fm_pipeline_default_base_ref)
+fm_pipeline_diff_paths() {
+  local gitdir=$1 head=$2 base=${3:-}
+  local paths
+
+  [ -n "$gitdir" ] && [ -d "$gitdir" ] || return 1
+  [ -n "$head" ] || return 1
+  git -C "$gitdir" cat-file -e "${head}^{commit}" 2>/dev/null || return 1
+
+  if [ -z "$base" ]; then
+    base=$(fm_pipeline_default_base_ref "$gitdir") || return 1
+  fi
+  git -C "$gitdir" rev-parse --verify --quiet "${base}^{commit}" >/dev/null || return 1
+
+  # Triple-dot matches fm-review-diff: merge-base of base and head ... head.
+  if ! paths=$(git -C "$gitdir" diff --name-only "${base}...${head}" 2>/dev/null); then
+    return 1
+  fi
+  # Collapse to a single space-separated line for meta storage.
+  paths=$(printf '%s\n' "$paths" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  printf '%s' "$paths"
+  return 0
+}
+
+# Rewrite selected key=value fields in a meta file, preserving other lines.
+# $1: meta path
+# remaining args: key=value pairs to set (empty value after = is allowed)
+_fm_pipeline_meta_set_fields() {
+  local meta=$1
+  shift
+  local tmp dir line key strip_keys arg
+
+  [ -f "$meta" ] || return 1
+  dir=$(dirname "$meta")
+  tmp=$(mktemp "$dir/.fm-meta-fields.XXXXXX") || return 1
+
+  strip_keys=
+  for arg in "$@"; do
+    key=${arg%%=*}
+    strip_keys="${strip_keys} ${key} "
+  done
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    key=${line%%=*}
+    case "$strip_keys" in
+      *" ${key} "*) ;;
+      *)
+        printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; return 1; }
+        ;;
+    esac
+  done < "$meta"
+
+  for arg in "$@"; do
+    printf '%s\n' "$arg" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  done
+  mv -f -- "$tmp" "$meta"
+}
+
+# Record changed_paths= and required_stages= into task meta from a real git
+# diff of the pushed PR head against its merge base. Recomputes whenever the
+# head moves (changed_paths_sha tracks the head that produced the paths).
+# Never trusts a worker self-report of paths.
+# $1: state directory
+# $2: task id
+# Prints the path list on success. Returns 1 when paths cannot be determined
+# (caller must block the ticket, not fall back to a generic stage set).
+fm_pipeline_record_changed_paths() {
+  local state=$1 task=$2
+  local meta="$state/$task.meta"
+  local wt proj head gitdir paths required
+
+  [ -f "$meta" ] || return 1
+  head=$(grep '^pr_head=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ -z "$head" ] || ! fm_pr_head_valid "$head"; then
+    echo "changed_paths: no valid pr_head for $task" >&2
+    return 1
+  fi
+
+  wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  proj=$(grep '^project=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+
+  gitdir=
+  if [ -n "$wt" ] && [ -d "$wt" ] \
+    && git -C "$wt" cat-file -e "${head}^{commit}" 2>/dev/null; then
+    gitdir=$wt
+  elif [ -n "$proj" ] && [ -d "$proj" ] \
+    && git -C "$proj" cat-file -e "${head}^{commit}" 2>/dev/null; then
+    gitdir=$proj
+  else
+    echo "changed_paths: no git object for $head in worktree/project for $task" >&2
+    return 1
+  fi
+
+  if ! paths=$(fm_pipeline_diff_paths "$gitdir" "$head"); then
+    echo "changed_paths: could not diff $head against default base for $task" >&2
+    return 1
+  fi
+
+  if [ -z "$paths" ]; then
+    # Diff resolved and is empty: known surface, not unknown. Code-review only.
+    required=code-review
+  else
+    if ! required=$(fm_pipeline_required_stages "$paths"); then
+      return 1
+    fi
+  fi
+
+  _fm_pipeline_meta_set_fields "$meta" \
+    "changed_paths=$paths" \
+    "required_stages=$required" \
+    "changed_paths_sha=$head" || return 1
+
+  printf '%s' "$paths"
+  return 0
 }
 
 # 0 if stage is in the required comma-list.
@@ -450,6 +602,8 @@ fm_pipeline_reviewer_task_id() {
 
 # Refresh pr_head= in meta from the live forge head. Rebinds a ready marker's
 # sha when the PR has moved so claims bind the current head, not a stale one.
+# When the head moves, recomputes changed_paths= / required_stages= from the
+# real git diff so stage selection cannot keep a stale surface.
 # Prints the live head on success. Returns 1 when the forge cannot be resolved
 # and no valid recorded head remains usable.
 # $1: state directory
@@ -458,7 +612,7 @@ fm_pipeline_reviewer_task_id() {
 fm_pipeline_refresh_pr_head() {
   local state=$1 task=$2 pipeline_dir=${3:-}
   local meta="$state/$task.meta"
-  local pr recorded live wt stage required ready_pr
+  local pr recorded live wt stage required ready_pr paths_sha
 
   [ -f "$meta" ] || return 1
   pr=$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -473,13 +627,31 @@ fm_pipeline_refresh_pr_head() {
   if [ -n "$live" ] && fm_pr_head_valid "$live"; then
     if [ "$live" != "$recorded" ]; then
       _fm_pipeline_meta_set_pr_head "$meta" "$live"
-      if [ -n "$pipeline_dir" ] && [ -f "$pipeline_dir/$task.ready" ]; then
-        stage=$(fm_ready_field "$pipeline_dir" "$task" stage 2>/dev/null || true)
-        required=$(fm_ready_field "$pipeline_dir" "$task" required 2>/dev/null || true)
-        ready_pr=$(fm_ready_field "$pipeline_dir" "$task" pr 2>/dev/null || true)
-        [ -n "$ready_pr" ] || ready_pr=$pr
-        if [ -n "$stage" ]; then
-          fm_ready_enqueue "$pipeline_dir" "$task" "$stage" "$live" "$required" "$ready_pr"
+    fi
+    # Recompute paths whenever head moved or paths were never bound to this head.
+    paths_sha=$(grep '^changed_paths_sha=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    if [ "$paths_sha" != "$live" ]; then
+      if ! fm_pipeline_record_changed_paths "$state" "$task" >/dev/null; then
+        echo "blocked: cannot determine changed paths after head refresh [sha=$live]" \
+          >> "$state/$task.status"
+        # Still return the live head so callers see the move; stage enqueue
+        # refuses without paths rather than greening a weaker stage set.
+      fi
+    fi
+    if [ -n "$pipeline_dir" ] && [ -f "$pipeline_dir/$task.ready" ]; then
+      stage=$(fm_ready_field "$pipeline_dir" "$task" stage 2>/dev/null || true)
+      required=$(grep '^required_stages=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      [ -n "$required" ] || required=$(fm_ready_field "$pipeline_dir" "$task" required 2>/dev/null || true)
+      ready_pr=$(fm_ready_field "$pipeline_dir" "$task" pr 2>/dev/null || true)
+      [ -n "$ready_pr" ] || ready_pr=$pr
+      if [ -n "$stage" ] && [ -n "$required" ]; then
+        # When surface grew (e.g. money path added), restart from first required
+        # so security-review cannot be skipped on a mid-flight code-review claim.
+        if ! fm_pipeline_stage_required "$stage" "$required"; then
+          stage=$(fm_pipeline_first_required "$required")
+        fi
+        fm_ready_enqueue "$pipeline_dir" "$task" "$stage" "$live" "$required" "$ready_pr"
+        if [ "$live" != "$recorded" ]; then
           echo "ready-for-review: $stage [sha=$live] [required=$required] [pr=$ready_pr] [head-refreshed=1]" \
             >> "$state/$task.status"
         fi
@@ -523,17 +695,7 @@ fm_pipeline_live_pr_head() {
 # $2: new head SHA
 _fm_pipeline_meta_set_pr_head() {
   local meta=$1 head=$2
-  local tmp dir
-  dir=$(dirname "$meta")
-  tmp=$(mktemp "$dir/.fm-meta-prhead.XXXXXX") || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      pr_head=*) ;;
-      *) printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; return 1; } ;;
-    esac
-  done < "$meta"
-  printf 'pr_head=%s\n' "$head" >> "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f -- "$tmp" "$meta"
+  _fm_pipeline_meta_set_fields "$meta" "pr_head=$head"
 }
 
 # --- blocked claimer visibility -----------------------------------------------

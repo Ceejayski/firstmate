@@ -121,9 +121,12 @@ for meta in "$STATE"/*.meta; do
   _fm_tick_has_trigger "$STATE" "$task" || continue
   _fm_tick_already_ready_or_beyond "$STATE" "$task" && continue
   if fm_ready_observables_ok "$STATE" "$task" 2>/dev/null; then
-    stage=$(fm_ready_enqueue_from_meta "$STATE" "$PIPELINE_DIR" "$task")
-    sha=$(fm_ready_meta_pr_head "$STATE/$task.meta")
-    printf 'tick: READY %s %s %s\n' "$task" "$stage" "$sha"
+    if stage=$(fm_ready_enqueue_from_meta "$STATE" "$PIPELINE_DIR" "$task"); then
+      sha=$(fm_ready_meta_pr_head "$STATE/$task.meta")
+      printf 'tick: READY %s %s %s\n' "$task" "$stage" "$sha"
+    else
+      printf 'tick: BLOCKED-PATHS %s\n' "$task"
+    fi
   else
     reason=$(fm_ready_observables_ok "$STATE" "$task" 2>&1 >/dev/null || true)
     printf 'tick: NOT-READY %s (%s)\n' "$task" "${reason:-observables failed}"

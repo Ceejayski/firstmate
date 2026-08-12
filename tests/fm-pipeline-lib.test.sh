@@ -106,6 +106,125 @@ test_required_stages_code_gets_qa() {
   pass "ordinary code requires code-review + qa"
 }
 
+test_required_stages_empty_fails_closed() {
+  local r
+  if r=$(fm_pipeline_required_stages "" 2>/dev/null); then
+    fail "empty paths must refuse, got: $r"
+  fi
+  if r=$(fm_pipeline_required_stages "   " 2>/dev/null); then
+    fail "whitespace-only paths must refuse, got: $r"
+  fi
+  pass "empty/unknown paths refuse generic stage default"
+}
+
+# Break: empty paths return code-review,qa (the production hole). Restore must refuse.
+test_break_restore_empty_paths_not_generic() {
+  broken_required_stages() {
+    local paths=${1:-}
+    if [ -z "$paths" ]; then
+      printf 'code-review,qa'
+      return 0
+    fi
+    fm_pipeline_required_stages "$paths"
+  }
+  r=$(broken_required_stages "")
+  [ "$r" = "code-review,qa" ] || fail "setup: broken default should be code-review,qa"
+  if r=$(fm_pipeline_required_stages "" 2>/dev/null); then
+    fail "restored required_stages must refuse empty paths, got $r"
+  fi
+  r=$(fm_pipeline_required_stages "src/wallet/ledger.ts")
+  printf '%s' "$r" | grep -q security-review || fail "money path still needs security: $r"
+  pass "break/restore: empty paths no longer degrade to code-review,qa"
+}
+
+# End-to-end: real git diff of a money path records paths and requires security-review.
+test_record_changed_paths_from_git_security() {
+  local case_dir proj wt head paths required
+  fm_git_identity
+  case_dir=$(fm_test_tmproot fm-paths-sec)
+  mkdir -p "$case_dir"
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/project" 2>/dev/null
+  printf 'base\n' > "$case_dir/project/README.md"
+  git -C "$case_dir/project" add README.md
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -qm base
+  git -C "$case_dir/project" push -q origin main
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b fm/ship-sec "$case_dir/wt" main
+  mkdir -p "$case_dir/wt/src/wallet"
+  printf 'export function debit() {}\n' > "$case_dir/wt/src/wallet/ledger.ts"
+  git -C "$case_dir/wt" add src/wallet/ledger.ts
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -qm "money path"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  printf 'kind=ship\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/99\npr_head=%s\nimplementer=ship-sec\n' \
+    "$case_dir/wt" "$case_dir/project" "$head" > "$STATE/ship-sec.meta"
+
+  paths=$(fm_pipeline_record_changed_paths "$STATE" "ship-sec") \
+    || fail "record_changed_paths should succeed from real git"
+  printf '%s' "$paths" | grep -q 'src/wallet/ledger.ts' \
+    || fail "paths should include wallet ledger: $paths"
+  grep -q '^changed_paths=.*src/wallet/ledger.ts' "$STATE/ship-sec.meta" \
+    || fail "meta missing changed_paths"
+  required=$(grep '^required_stages=' "$STATE/ship-sec.meta" | cut -d= -f2-)
+  printf '%s' "$required" | grep -q 'security-review' \
+    || fail "money path must require security-review end-to-end, got $required"
+  grep -q "^changed_paths_sha=$head" "$STATE/ship-sec.meta" \
+    || fail "meta must bind paths to head sha"
+  pass "record_changed_paths from git makes security-review reachable"
+}
+
+test_record_changed_paths_missing_git_blocks() {
+  printf 'kind=ship\npr=https://github.com/o/r/pull/1\npr_head=%s\n' \
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" > "$STATE/no-git.meta"
+  if fm_pipeline_record_changed_paths "$STATE" "no-git" 2>/dev/null; then
+    fail "missing git objects must not silently succeed"
+  fi
+  pass "missing git for paths is a hard failure"
+}
+
+test_record_changed_paths_recomputes_on_head_move() {
+  local case_dir head1 head2 required
+  fm_git_identity
+  case_dir=$(fm_test_tmproot fm-paths-move)
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/project" 2>/dev/null
+  printf 'base\n' > "$case_dir/project/README.md"
+  git -C "$case_dir/project" add README.md
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -qm base
+  git -C "$case_dir/project" push -q origin main
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b fm/ship-mv "$case_dir/wt" main
+  mkdir -p "$case_dir/wt/docs"
+  printf 'copy only\n' > "$case_dir/wt/docs/note.md"
+  git -C "$case_dir/wt" add docs/note.md
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -qm docs
+  head1=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  printf 'kind=ship\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\npr_head=%s\n' \
+    "$case_dir/wt" "$case_dir/project" "$head1" > "$STATE/ship-mv.meta"
+  fm_pipeline_record_changed_paths "$STATE" "ship-mv" >/dev/null \
+    || fail "initial record should work"
+  required=$(grep '^required_stages=' "$STATE/ship-mv.meta" | cut -d= -f2-)
+  [ "$required" = "code-review" ] || fail "docs-only should be code-review, got $required"
+
+  mkdir -p "$case_dir/wt/src/payment"
+  printf 'pay()\n' > "$case_dir/wt/src/payment/charge.ts"
+  git -C "$case_dir/wt" add src/payment/charge.ts
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -qm payment
+  head2=$(git -C "$case_dir/wt" rev-parse HEAD)
+  _fm_pipeline_meta_set_pr_head "$STATE/ship-mv.meta" "$head2"
+  fm_pipeline_record_changed_paths "$STATE" "ship-mv" >/dev/null \
+    || fail "recompute after head move should work"
+  required=$(grep '^required_stages=' "$STATE/ship-mv.meta" | cut -d= -f2-)
+  printf '%s' "$required" | grep -q security-review \
+    || fail "after money path lands, security-review required, got $required"
+  grep -q "^changed_paths_sha=$head2" "$STATE/ship-mv.meta" || fail "paths sha must track head"
+  pass "paths recompute when head moves (docs → payment)"
+}
+
 # --- independence enforcement (fail closed) ----------------------------------
 
 test_independent_reviewer_passes() {
@@ -352,6 +471,11 @@ test_required_stages_money_gets_security
 test_required_stages_auth_gets_security
 test_required_stages_docs_only
 test_required_stages_code_gets_qa
+test_required_stages_empty_fails_closed
+test_break_restore_empty_paths_not_generic
+test_record_changed_paths_from_git_security
+test_record_changed_paths_missing_git_blocks
+test_record_changed_paths_recomputes_on_head_move
 test_independent_reviewer_passes
 test_same_implementer_fails
 test_empty_implementer_fails_closed
@@ -374,4 +498,4 @@ test_blocked_claimer_visible_and_releases
 test_quota_dead_claimer_visible
 test_reviewer_task_id_stable
 
-printf '\n1..%d\n' 30
+printf '\n1..%d\n' 35

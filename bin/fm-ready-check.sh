@@ -95,8 +95,30 @@ fm_ready_observables_ok() {
   return 0
 }
 
+# Append blocked: for missing changed paths at most once per consecutive failure
+# so the tick can retry without flooding the status log.
+# $1: status path  $2: task  $3: sha  $4: pr
+_fm_ready_block_paths() {
+  local status=$1 task=$2 sha=$3 pr=$4
+  local last
+  last=$(tail -1 "$status" 2>/dev/null || true)
+  case "$last" in
+    blocked:*changed\ paths*)
+      # Already blocked for paths; allow silent retry without flooding status.
+      ;;
+    *)
+      echo "blocked: cannot determine changed paths for stage selection [sha=$sha] [pr=$pr]" \
+        >> "$status"
+      echo "cannot determine changed paths for $task" >&2
+      ;;
+  esac
+}
+
 # Enqueue a ready ticket from observables. Caller must have verified
 # fm_ready_observables_ok. Prints the first stage.
+# Records changed_paths= / required_stages= from a real git diff before stage
+# selection; refuses (blocked:) when paths cannot be determined rather than
+# greening a weaker generic stage set.
 # $1: state dir
 # $2: pipeline dir
 # $3: task id
@@ -104,16 +126,41 @@ fm_ready_enqueue_from_meta() {
   local state=$1 pipeline_dir=$2 task=$3
   local meta="$state/$task.meta"
   local status="$state/$task.status"
-  local pr sha required paths stage
+  local pr sha required paths stage paths_sha
 
   pr=$(fm_ready_meta_pr "$meta")
   sha=$(fm_ready_meta_pr_head "$meta")
+
+  # Derive paths from the pushed head against its merge base. Self-reported
+  # paths are never stage authority.
+  paths_sha=$(grep '^changed_paths_sha=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ "$paths_sha" != "$sha" ] \
+    || ! grep -q '^changed_paths=' "$meta" 2>/dev/null \
+    || ! grep -q '^required_stages=' "$meta" 2>/dev/null; then
+    if ! fm_pipeline_record_changed_paths "$state" "$task" >/dev/null 2>&1; then
+      _fm_ready_block_paths "$status" "$task" "$sha" "$pr"
+      return 1
+    fi
+  fi
+
   required=$(grep '^required_stages=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   if [ -z "$required" ]; then
     paths=$(grep '^changed_paths=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    required=$(fm_pipeline_required_stages "$paths")
+    if [ -z "$paths" ]; then
+      _fm_ready_block_paths "$status" "$task" "$sha" "$pr"
+      return 1
+    fi
+    if ! required=$(fm_pipeline_required_stages "$paths"); then
+      _fm_ready_block_paths "$status" "$task" "$sha" "$pr"
+      return 1
+    fi
+    _fm_pipeline_meta_set_fields "$meta" "required_stages=$required" || return 1
   fi
   stage=$(fm_pipeline_first_required "$required")
+  [ -n "$stage" ] || {
+    _fm_ready_block_paths "$status" "$task" "$sha" "$pr"
+    return 1
+  }
 
   fm_pipeline_init "$pipeline_dir"
   fm_ready_enqueue "$pipeline_dir" "$task" "$stage" "$sha" "$required" "$pr"
@@ -144,7 +191,9 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     exit "$rc"
   fi
 
-  STAGE=$(fm_ready_enqueue_from_meta "$STATE" "$PIPELINE_DIR" "$ID")
+  if ! STAGE=$(fm_ready_enqueue_from_meta "$STATE" "$PIPELINE_DIR" "$ID"); then
+    exit 1
+  fi
   printf '%s' "$STAGE"
   exit 0
 fi

@@ -77,23 +77,55 @@ test_scout_not_ready() {
   pass "scout is not pipeline-ready"
 }
 
+# Build a mini remote+worktree with one changed path; print head SHA.
+# $1: case name  $2: relative path to create under the worktree  $3: file body
+make_ship_git() {
+  local name=$1 relpath=$2 body=$3
+  local case_dir="$FM_HOME/git-fixtures/$name"
+  mkdir -p "$case_dir"
+  fm_git_identity
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/project" 2>/dev/null
+  printf 'base\n' > "$case_dir/project/README.md"
+  git -C "$case_dir/project" add README.md
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -qm base
+  git -C "$case_dir/project" push -q origin main
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b "fm/$name" "$case_dir/wt" main
+  mkdir -p "$case_dir/wt/$(dirname "$relpath")"
+  printf '%s\n' "$body" > "$case_dir/wt/$relpath"
+  git -C "$case_dir/wt" add "$relpath"
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -qm "change $relpath"
+  HEAD_SHA=$(git -C "$case_dir/wt" rev-parse HEAD)
+  CASE_DIR=$case_dir
+}
+
 test_enqueue_from_meta_surface_security() {
-  write_meta "t-sec" "kind=ship" \
-    "pr=https://github.com/o/r/pull/2" "pr_head=$SHA40" \
-    "changed_paths=src/wallet/ledger.ts src/api/auth/login.ts"
-  stage=$(fm_ready_enqueue_from_meta "$STATE" "$PIPELINE" "t-sec")
+  make_ship_git t-sec "src/wallet/ledger.ts" "export const ledger = 1"
+  write_meta "t-sec" "kind=ship" "implementer=t-sec" \
+    "worktree=$CASE_DIR/wt" "project=$CASE_DIR/project" \
+    "pr=https://github.com/o/r/pull/2" "pr_head=$HEAD_SHA"
+  : > "$STATE/t-sec.status"
+  stage=$(fm_ready_enqueue_from_meta "$STATE" "$PIPELINE" "t-sec") \
+    || fail "enqueue should succeed for money path"
   [ "$stage" = "code-review" ] || fail "first stage should be code-review, got $stage"
   req=$(fm_ready_field "$PIPELINE" "t-sec" required)
   printf '%s' "$req" | grep -q "security-review" || fail "money/auth paths need security, got $req"
+  grep -q 'changed_paths=.*src/wallet/ledger.ts' "$STATE/t-sec.meta" \
+    || fail "meta must record changed_paths from git"
   grep -q "ready-for-review: code-review" "$STATE/t-sec.status" || fail "status line missing"
-  pass "security surfaces require security-review stage"
+  pass "security surfaces require security-review stage (from real git paths)"
 }
 
 test_enqueue_docs_only_skips_security() {
-  write_meta "t-docs" "kind=ship" \
-    "pr=https://github.com/o/r/pull/3" "pr_head=$SHA40" \
-    "changed_paths=docs/readme.md copy/banner.txt"
-  stage=$(fm_ready_enqueue_from_meta "$STATE" "$PIPELINE" "t-docs")
+  make_ship_git t-docs "docs/readme.md" "# docs only"
+  write_meta "t-docs" "kind=ship" "implementer=t-docs" \
+    "worktree=$CASE_DIR/wt" "project=$CASE_DIR/project" \
+    "pr=https://github.com/o/r/pull/3" "pr_head=$HEAD_SHA"
+  : > "$STATE/t-docs.status"
+  stage=$(fm_ready_enqueue_from_meta "$STATE" "$PIPELINE" "t-docs") \
+    || fail "docs enqueue should succeed"
   req=$(fm_ready_field "$PIPELINE" "t-docs" required)
   [ "$req" = "code-review" ] || fail "docs-only should be code-review only, got $req"
   [ "$stage" = "code-review" ] || fail "first stage code-review"
@@ -101,12 +133,28 @@ test_enqueue_docs_only_skips_security() {
 }
 
 test_cli_ready_check() {
-  write_meta "t-cli" "kind=ship" \
-    "pr=https://github.com/o/r/pull/4" "pr_head=$SHA40" \
-    "changed_paths=src/foo.ts"
+  make_ship_git t-cli "src/foo.ts" "export const x = 1"
+  write_meta "t-cli" "kind=ship" "implementer=t-cli" \
+    "worktree=$CASE_DIR/wt" "project=$CASE_DIR/project" \
+    "pr=https://github.com/o/r/pull/4" "pr_head=$HEAD_SHA"
   out=$("$ROOT/bin/fm-ready-check.sh" "t-cli" "$STATE") || fail "cli should exit 0"
   [ "$out" = "code-review" ] || fail "cli should print first stage, got $out"
+  grep -q '^required_stages=code-review,qa' "$STATE/t-cli.meta" \
+    || fail "ordinary code should record code-review,qa"
   pass "CLI ready-check enqueues and prints stage"
+}
+
+test_enqueue_without_paths_source_blocks() {
+  write_meta "t-nopath" "kind=ship" "implementer=t-nopath" \
+    "pr=https://github.com/o/r/pull/5" "pr_head=$SHA40"
+  : > "$STATE/t-nopath.status"
+  if fm_ready_enqueue_from_meta "$STATE" "$PIPELINE" "t-nopath" 2>/dev/null; then
+    fail "missing git path source must not enqueue"
+  fi
+  grep -q "blocked: cannot determine changed paths" "$STATE/t-nopath.status" \
+    || fail "must append blocked: for missing paths"
+  [ ! -f "$PIPELINE/t-nopath.ready" ] || fail "must not create ready marker"
+  pass "unknown paths block enqueue (never generic code-review,qa)"
 }
 
 test_cli_refuses_done_without_pr() {
@@ -150,7 +198,8 @@ test_scout_not_ready
 test_enqueue_from_meta_surface_security
 test_enqueue_docs_only_skips_security
 test_cli_ready_check
+test_enqueue_without_paths_source_blocks
 test_cli_refuses_done_without_pr
 test_break_restore_done_is_not_readiness
 
-printf '\n1..%d\n' 11
+printf '\n1..%d\n' 12

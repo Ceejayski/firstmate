@@ -113,7 +113,24 @@ fi
 PATHS=$(grep '^changed_paths=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 REQUIRED=$(grep '^required_stages=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 if [ -z "$REQUIRED" ]; then
-  REQUIRED=$(fm_pipeline_required_stages "$PATHS")
+  if [ -z "$PATHS" ]; then
+    # Last chance: derive from the live git diff rather than greening generic stages.
+    if ! fm_pipeline_record_changed_paths "$STATE" "$TICKET" >/dev/null; then
+      echo "error: no changed_paths/required_stages for $TICKET and could not derive them" >&2
+      exit 1
+    fi
+    PATHS=$(grep '^changed_paths=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    REQUIRED=$(grep '^required_stages=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  else
+    if ! REQUIRED=$(fm_pipeline_required_stages "$PATHS"); then
+      echo "error: could not derive required stages for $TICKET" >&2
+      exit 1
+    fi
+  fi
+fi
+if [ -z "$REQUIRED" ]; then
+  echo "error: required stages still empty for $TICKET" >&2
+  exit 1
 fi
 
 # Surface flags from path layer (layer-2 diff content is a later ship).

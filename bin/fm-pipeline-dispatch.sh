@@ -144,6 +144,7 @@ while IFS= read -r stage; do
 
     if [ "$SPAWN" -eq 1 ]; then
       if [ -z "$HARNESS" ]; then
+        fm_claim_release "$PIPELINE_DIR" "$task" "$claimer" 2>/dev/null || true
         echo "blocked: pipeline dispatch needs a review harness (set FM_PIPELINE_REVIEW_HARNESS or config/crew-harness) for $task" \
           >> "$STATE/$task.status"
         printf 'dispatch: BLOCKED-HARNESS %s %s claimer=%s brief=%s\n' \
@@ -154,6 +155,7 @@ while IFS= read -r stage; do
 
       proj=$(grep '^project=' "$STATE/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
       if [ -z "$proj" ] || [ ! -d "$proj" ]; then
+        fm_claim_release "$PIPELINE_DIR" "$task" "$claimer" 2>/dev/null || true
         echo "blocked: pipeline dispatch missing project path for $task" \
           >> "$STATE/$task.status"
         printf 'dispatch: BLOCKED-PROJECT %s %s\n' "$task" "$stage"
@@ -167,6 +169,7 @@ while IFS= read -r stage; do
         printf 'dispatch: SPAWNED %s %s claimer=%s sha=%s\n' \
           "$task" "$stage" "$claimer" "$sha"
       else
+        fm_claim_release "$PIPELINE_DIR" "$task" "$claimer" 2>/dev/null || true
         err=$(head -c 200 "$STATE/$claimer.spawn-err" 2>/dev/null | tr '\n' ' ' || true)
         echo "blocked: pipeline spawn failed for $claimer on $task: $err" \
           >> "$STATE/$task.status"

@@ -18,7 +18,7 @@ BRIEF="$ROOT/bin/fm-review-brief.sh"
 test_composes_code_review_brief() {
   fm_write_meta "$STATE/ship-1.meta" "kind=ship" "implementer=ship-1" "harness=qwen" \
     "project=$ROOT" "pr=https://github.com/o/r/pull/9" "pr_head=$SHA40" \
-    "changed_paths=bin/fm-foo.sh"
+    "changed_paths=bin/fm-foo.sh" "required_stages=code-review,qa"
   out=$("$BRIEF" ship-1 code-review --state "$STATE" --pipeline-dir "$PIPELINE" \
     --claimer rvw-ship-1-cr)
   [ -f "$out" ] || fail "brief path missing: $out"
