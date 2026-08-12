@@ -37,11 +37,22 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 # its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
 # needs a custom verb vocabulary; absent, this default applies.
 #
-# Free-text tokens (PR ready, checks green, ready in branch, merged) exist only for
-# legacy lines that lack a standard terminal verb. status_is_captain_relevant is
-# verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
-# merely because its prose contains one of those tokens (for example
-# "working: rebased onto merged #76").
+# The set holds three distinct categories, and a new entry belongs to exactly one:
+#   1. Terminal verbs (done:, needs-decision:, blocked:, failed:) - the only ones
+#      status_is_terminal_verb recognizes, matched by the early case in
+#      status_is_captain_relevant before the grep ever runs.
+#   2. Auto-pipeline verbs (ready-for-review:, ready-for-merge:, verdict:,
+#      returned:, review-dispatched:) - captain-relevant ONLY through the free-text
+#      grep below, and deliberately NOT terminal: they report a pipeline hand-off
+#      still in flight, so consumers that branch on status_is_terminal_verb must
+#      keep treating them as nonterminal. Add a pipeline verb here, never to
+#      status_is_terminal_verb.
+#   3. Legacy free-text tokens (PR ready, checks green, ready in branch, merged) -
+#      no verb at all, kept for old lines that predate the standard vocabulary.
+# status_is_captain_relevant is verb-aware: a nonterminal working: or paused: line
+# never becomes captain-relevant merely because its prose contains a category-2 or
+# category-3 token (for example "working: rebased onto merged #76" or
+# "paused: waiting on verdict: upstream").
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|ready-for-review:|ready-for-merge:|verdict:|returned:|review-dispatched:|PR ready|checks green|ready in branch|merged'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
