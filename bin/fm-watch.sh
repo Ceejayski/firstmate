@@ -103,6 +103,10 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+# Pipeline tick runs on the same check cadence so ready tickets advance and
+# stage agents dispatch without firstmate remembering to call fm-pipeline-tick.
+# Set FM_PIPELINE_TICK=0 to disable (library-only mode).
+PIPELINE_TICK=${FM_PIPELINE_TICK:-1}
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -739,6 +743,17 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    # Advance the auto-review pipeline on the same cadence: sweep expired
+    # claims, refresh forge heads, enqueue observable readiness, apply
+    # verdicts, surface blocked claimers, and dispatch stage agents. Status
+    # appends from the tick ride the ordinary signal path (ready-for-review,
+    # ready-for-merge, blocked, needs-decision, review-dispatched).
+    if [ "$PIPELINE_TICK" != "0" ] && [ -x "$SCRIPT_DIR/fm-pipeline-tick.sh" ]; then
+      tick_out=$("$SCRIPT_DIR/fm-pipeline-tick.sh" --state "$STATE" 2>&1) || true
+      if [ -n "$tick_out" ]; then
+        triage_log "pipeline-tick: $(printf '%s' "$tick_out" | tr '\n' ' ' | head -c 400)"
+      fi
+    fi
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue

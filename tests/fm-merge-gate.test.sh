@@ -127,6 +127,18 @@ test_cannot_verify_refuses() {
   pass "cannot-verify escalates, does not merge"
 }
 
+test_missing_implementer_refuses() {
+  : > "$STATE/m-noimpl.status"
+  fm_write_meta "$STATE/m-noimpl.meta" "kind=ship" "harness=qwen" \
+    "pr=https://github.com/o/r/pull/1" "pr_head=$SHA_A"
+  append_verdict "m-noimpl" green "$SHA_A" code-review "rev-code"
+  out=$(fm_merge_gate_check "$STATE" "m-noimpl" "$SHA_A" "code-review" "merger-1" 2>/dev/null) \
+    && fail "missing implementer must refuse"
+  printf '%s' "$out" | grep -qi 'implementer identity missing' \
+    || fail "reason should mention missing implementer: $out"
+  pass "missing implementer fails closed at merge gate"
+}
+
 # Break/restore: if SHA binding is ignored, a moved PR would wrongly pass.
 test_break_restore_sha_binding() {
   fresh "m-br"
@@ -167,7 +179,8 @@ test_implementer_as_reviewer_refuses
 test_implementer_as_merger_refuses
 test_docs_only_required_skips_security
 test_cannot_verify_refuses
+test_missing_implementer_refuses
 test_break_restore_sha_binding
 test_cli_ok
 
-printf '\n1..%d\n' 12
+printf '\n1..%d\n' 13

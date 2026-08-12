@@ -86,6 +86,9 @@ fm_merge_gate_latest_verdict_for() {
 
 # Core gate check. Prints "ok" on success; prints "refuse: <reason>" and returns
 # 1 on failure.
+# Prefer fm_merge_gate_check_live when a forge is reachable so the gate binds the
+# live head rather than a stale recorded SHA. Post-merge build verification is a
+# separate ship (blocker 5); layer-2 diff-content stage selection is separate.
 # $1: state directory
 # $2: task id
 # $3: current PR head SHA (must be forge-resolvable 40/64 hex)
@@ -113,6 +116,10 @@ fm_merge_gate_check() {
   fi
 
   implementer=$(fm_pipeline_implementer_id "$state" "$task")
+  if [ -z "$implementer" ]; then
+    printf 'refuse: implementer identity missing — cannot verify independence\n'
+    return 1
+  fi
 
   # shellcheck disable=SC2086
   IFS_SAVE=$IFS
@@ -157,6 +164,10 @@ fm_merge_gate_check() {
         ;;
     esac
     reviewer=$(fm_verdict_reviewer "$line")
+    if [ -z "$reviewer" ]; then
+      printf 'refuse: reviewer identity missing on stage %s verdict\n' "$stage"
+      return 1
+    fi
     if ! fm_pipeline_roles_distinct "$implementer" "$reviewer" "$merger"; then
       printf 'refuse: independence violation involving %s\n' "$reviewer"
       return 1
@@ -164,14 +175,31 @@ fm_merge_gate_check() {
     reviewers="${reviewers:+$reviewers,}$reviewer"
   done
 
-  # Merger must not equal implementer when both known.
-  if ! fm_pipeline_roles_distinct "$implementer" "" "$merger"; then
+  # Merger must not equal implementer when merger id is provided.
+  if [ -n "$merger" ] && ! fm_pipeline_roles_distinct "$implementer" "" "$merger"; then
     printf 'refuse: merger must differ from implementer\n'
     return 1
   fi
 
   printf 'ok\n'
   return 0
+}
+
+# Refresh the live forge head, then run the gate against that SHA.
+# $1: state directory
+# $2: task id
+# $3: required stages comma-list
+# $4: merger agent id (optional)
+# $5: pipeline directory (optional; rebinds ready marker when head moves)
+fm_merge_gate_check_live() {
+  local state=$1 task=$2 required=$3 merger=${4:-} pipeline_dir=${5:-}
+  local live
+
+  live=$(fm_pipeline_refresh_pr_head "$state" "$task" "$pipeline_dir") || {
+    printf 'refuse: could not resolve live PR head for %s\n' "$task"
+    return 1
+  }
+  fm_merge_gate_check "$state" "$task" "$live" "$required" "$merger"
 }
 
 # CLI entry when executed, not sourced.
@@ -184,6 +212,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   TASK=
   HEAD=
   PIPELINE_DIR=
+  LIVE=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -191,18 +220,19 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
       --merger) MERGER=$2; shift 2 ;;
       --pipeline-dir) PIPELINE_DIR=$2; shift 2 ;;
       --required) REQUIRED=$2; shift 2 ;;
+      --live) LIVE=1; shift ;;
       -h|--help)
         sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
         exit 0
         ;;
       -*)
-        echo "usage: fm-merge-gate.sh <task-id> <current-pr-head-sha> [required]" >&2
+        echo "usage: fm-merge-gate.sh <task-id> [<current-pr-head-sha>|--live] [required]" >&2
         exit 2
         ;;
       *)
         if [ -z "$TASK" ]; then
           TASK=$1
-        elif [ -z "$HEAD" ]; then
+        elif [ -z "$HEAD" ] && [ "$LIVE" -eq 0 ]; then
           HEAD=$1
         else
           REQUIRED=$1
@@ -212,13 +242,27 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     esac
   done
 
-  if [ -z "$TASK" ] || [ -z "$HEAD" ]; then
-    echo "usage: fm-merge-gate.sh <task-id> <current-pr-head-sha> [required]" >&2
+  if [ -z "$TASK" ]; then
+    echo "usage: fm-merge-gate.sh <task-id> [<current-pr-head-sha>|--live] [required]" >&2
     exit 2
   fi
+  if [ "$LIVE" -eq 0 ] && [ -z "$HEAD" ]; then
+    # Default: refresh live head before gate (PR can move under review).
+    LIVE=1
+  fi
 
-  # Unused today but reserved so callers can pass pipeline dir without breaking.
-  : "${PIPELINE_DIR:=}"
+  : "${PIPELINE_DIR:=${FM_PIPELINE_DIR_OVERRIDE:-$FM_HOME/state/pipeline}}"
+
+  if [ "$LIVE" -eq 1 ]; then
+    if result=$(fm_merge_gate_check_live "$STATE" "$TASK" "$REQUIRED" "$MERGER" "$PIPELINE_DIR"); then
+      printf '%s\n' "$result"
+      exit 0
+    else
+      printf '%s\n' "$result" >&2
+      printf '%s\n' "$result"
+      exit 1
+    fi
+  fi
 
   if result=$(fm_merge_gate_check "$STATE" "$TASK" "$HEAD" "$REQUIRED" "$MERGER"); then
     printf '%s\n' "$result"

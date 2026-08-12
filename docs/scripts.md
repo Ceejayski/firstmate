@@ -51,6 +51,14 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-config-push.sh`      | Push declared inherited local material to live secondmates mid-session and send a pointer to the literal-content config reread when config changed |
 | `fm-project-mode.sh`     | Resolve a project's delivery mode and `+yolo` flag from `data/projects.md`           |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
+| `fm-claim-lib.sh`        | Exclusive expiring ticket claims (hard-link create; expiry returns to ready queue)   |
+| `fm-verdict-lib.sh`      | SHA-bound stage verdicts on status files                                             |
+| `fm-ready-check.sh`      | Third-party observable readiness (pr= + pr_head=; never bare done:)                  |
+| `fm-pipeline-lib.sh`     | Stage order, independence fail-closed, claim-next, advance/return, head refresh      |
+| `fm-pipeline-tick.sh`    | One pipeline step: sweep, refresh heads, ready, apply verdicts, dispatch reviewers   |
+| `fm-pipeline-dispatch.sh`| Claim a ready stage, compose standing review brief, optionally spawn scout reviewer  |
+| `fm-review-brief.sh`     | Compose independent reviewer brief from the standing review-check catalog            |
+| `fm-merge-gate.sh`       | Independent SHA-bound merge gate (prints ok/refuse; never merges itself)             |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and one-shot escalation |

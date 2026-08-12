@@ -5,8 +5,8 @@
 # These tests prove:
 #   1. Stage transitions: green → next required stage, red → implementer
 #   2. Surface-based required stages (security for money/auth, not for copy)
-#   3. Independence: implementer and reviewer must be different agents
-#   4. Claim-next: picks the next available ticket at a stage
+#   3. Independence: fail-closed; implementer and reviewer must be different agents
+#   4. Claim-next: always requires state_dir; picks next available ticket
 #   5. Sweep: expired claims are returned to the queue
 #   6. Blocked claimer is visible as blocked, ticket returns to queue
 #   7. Apply verdict green/red/cannot-verify
@@ -61,7 +61,6 @@ test_advance_security_review_to_merge() {
 
 test_advance_skips_unrequired_security() {
   fresh_status "task-skip"
-  # code-review,qa only — after qa, go to merge (no security).
   fm_pipeline_advance "$Q" "task-skip" "qa" "abc123" "code-review,qa" "$STATE"
   grep -q "ready-for-merge" "$STATE/task-skip.status" || fail "should merge after qa when security not required"
   [ ! -f "$Q/task-skip.ready" ] || fail "no ready file after merge"
@@ -107,18 +106,42 @@ test_required_stages_code_gets_qa() {
   pass "ordinary code requires code-review + qa"
 }
 
-# --- independence enforcement ------------------------------------------------
+# --- independence enforcement (fail closed) ----------------------------------
 
 test_independent_reviewer_passes() {
-  printf 'harness=qwen\nmodel=qwen3.6-flash\n' > "$STATE/task-5.meta"
-  fm_pipeline_independent "$STATE" "task-5" "claude" || fail "different harness should be independent"
-  pass "independent reviewer passes (different harness)"
+  printf 'implementer=ship-task-5\nharness=qwen\n' > "$STATE/task-5.meta"
+  fm_pipeline_independent "$STATE" "task-5" "rvw-task-5-cr" \
+    || fail "different agent ids should be independent"
+  pass "independent reviewer passes (different agent id)"
 }
 
-test_same_harness_reviewer_fails() {
-  printf 'harness=qwen\nmodel=qwen3.6-flash\n' > "$STATE/task-6.meta"
-  fm_pipeline_independent "$STATE" "task-6" "qwen" && fail "same harness should fail independence"
-  pass "same harness reviewer fails independence"
+test_same_implementer_fails() {
+  printf 'implementer=ship-task-6\nharness=qwen\n' > "$STATE/task-6.meta"
+  fm_pipeline_independent "$STATE" "task-6" "ship-task-6" 2>/dev/null \
+    && fail "same implementer id must fail independence"
+  pass "same implementer id fails independence"
+}
+
+test_empty_implementer_fails_closed() {
+  printf 'harness=qwen\n' > "$STATE/task-empty.meta"
+  fm_pipeline_independent "$STATE" "task-empty" "reviewer-x" 2>/dev/null \
+    && fail "empty implementer must fail closed (not allow)"
+  pass "empty implementer fails closed"
+}
+
+test_empty_reviewer_fails_closed() {
+  printf 'implementer=ship-x\n' > "$STATE/task-er.meta"
+  fm_pipeline_independent "$STATE" "task-er" "" 2>/dev/null \
+    && fail "empty reviewer must fail closed"
+  pass "empty reviewer fails closed"
+}
+
+test_same_harness_different_agents_allowed() {
+  # Harness is not agent identity — two Qwen agents must remain independent.
+  printf 'implementer=ship-qwen-a\nharness=qwen\n' > "$STATE/task-harness.meta"
+  fm_pipeline_independent "$STATE" "task-harness" "rvw-qwen-b" \
+    || fail "same harness with different agent ids must be independent"
+  pass "same harness, different agent ids allowed"
 }
 
 test_roles_distinct() {
@@ -126,16 +149,47 @@ test_roles_distinct() {
   fm_pipeline_roles_distinct "a" "a" "c" 2>/dev/null && fail "impl=rev should fail"
   fm_pipeline_roles_distinct "a" "b" "a" 2>/dev/null && fail "impl=mer should fail"
   fm_pipeline_roles_distinct "a" "b" "b" 2>/dev/null && fail "rev=mer should fail"
-  pass "roles_distinct pairwise checks"
+  fm_pipeline_roles_distinct "" "b" "c" 2>/dev/null && fail "empty impl should fail closed"
+  pass "roles_distinct pairwise checks (fail closed on empty impl)"
+}
+
+test_break_restore_independence_fail_open() {
+  # Break: empty implementer allows (the Ship 2 hole). Prove restored code refuses.
+  printf 'harness=only\n' > "$STATE/task-br.meta"
+  if fm_pipeline_independent "$STATE" "task-br" "any-reviewer" 2>/dev/null; then
+    fail "restored independence must refuse empty implementer"
+  fi
+  # With durable id, distinct claimer passes.
+  printf 'implementer=ship-br\n' > "$STATE/task-br.meta"
+  fm_pipeline_independent "$STATE" "task-br" "rvw-br-cr" \
+    || fail "distinct ids should pass after restore"
+  # Same id fails.
+  fm_pipeline_independent "$STATE" "task-br" "ship-br" 2>/dev/null \
+    && fail "same id must fail after restore"
+  pass "break/restore independence: empty refuses; distinct passes; match refuses"
 }
 
 # --- claim next --------------------------------------------------------------
 
+test_claim_next_requires_state_dir() {
+  rm -f "$Q"/*.ready "$Q"/*.claim
+  fm_ready_enqueue "$Q" "task-ns" "code-review" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  printf 'implementer=impl-ns\n' > "$STATE/task-ns.meta"
+  if fm_pipeline_claim_next "$Q" "code-review" "reviewer-alpha" 2>/dev/null; then
+    fail "claim_next without state_dir must refuse"
+  fi
+  pass "claim_next requires state_dir (no fail-open omit)"
+}
+
 test_claim_next_picks_available() {
-  fm_ready_enqueue "$Q" "task-7" "code-review" "abc123"
-  fm_ready_enqueue "$Q" "task-8" "code-review" "def456"
+  rm -f "$Q"/*.ready "$Q"/*.claim
+  SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  fm_ready_enqueue "$Q" "task-7" "code-review" "$SHA40"
+  fm_ready_enqueue "$Q" "task-8" "code-review" "$SHA40"
+  printf 'implementer=impl-7\n' > "$STATE/task-7.meta"
+  printf 'implementer=impl-8\n' > "$STATE/task-8.meta"
   local result
-  result=$(fm_pipeline_claim_next "$Q" "code-review" "reviewer-alpha")
+  result=$(fm_pipeline_claim_next "$Q" "code-review" "reviewer-alpha" "$STATE")
   [ -n "$result" ] || fail "should have claimed a ticket"
   printf '%s' "$result" | grep -q "task-" || fail "should return task-id and sha"
   local count
@@ -145,31 +199,47 @@ test_claim_next_picks_available() {
 }
 
 test_claim_next_skips_claimed() {
-  fm_ready_enqueue "$Q" "task-9" "code-review" "abc123"
-  fm_ready_enqueue "$Q" "task-10" "code-review" "def456"
-  fm_claim_acquire "$Q" "task-9" "other-reviewer" "abc123" "code-review" 60
+  rm -f "$Q"/*.ready "$Q"/*.claim
+  SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  fm_ready_enqueue "$Q" "task-9" "code-review" "$SHA40"
+  fm_ready_enqueue "$Q" "task-10" "code-review" "$SHA40"
+  printf 'implementer=impl-9\n' > "$STATE/task-9.meta"
+  printf 'implementer=impl-10\n' > "$STATE/task-10.meta"
+  fm_claim_acquire "$Q" "task-9" "other-reviewer" "$SHA40" "code-review" 60
   local result
-  result=$(fm_pipeline_claim_next "$Q" "code-review" "reviewer-alpha")
+  result=$(fm_pipeline_claim_next "$Q" "code-review" "reviewer-alpha" "$STATE")
   printf '%s' "$result" | grep -q "task-10" || fail "should pick task-10 (task-9 claimed)"
   pass "claim_next skips claimed tickets"
 }
 
 test_claim_next_refuses_same_implementer() {
-  # Isolate the queue so leftover ready markers from prior tests cannot be claimed.
   rm -f "$Q"/*.ready "$Q"/*.claim
-  fm_ready_enqueue "$Q" "task-ind" "code-review" "abc123"
+  SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  fm_ready_enqueue "$Q" "task-ind" "code-review" "$SHA40"
   printf 'implementer=reviewer-alpha\nharness=qwen\n' > "$STATE/task-ind.meta"
-  if result=$(fm_pipeline_claim_next "$Q" "code-review" "reviewer-alpha" 60 "$STATE"); then
+  if result=$(fm_pipeline_claim_next "$Q" "code-review" "reviewer-alpha" "$STATE"); then
     fail "same implementer must not claim, got $result"
   fi
-  pass "claim_next enforces independence when state given"
+  pass "claim_next always enforces independence"
+}
+
+test_claim_next_refuses_missing_implementer() {
+  rm -f "$Q"/*.ready "$Q"/*.claim
+  SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  fm_ready_enqueue "$Q" "task-miss" "code-review" "$SHA40"
+  printf 'harness=qwen\n' > "$STATE/task-miss.meta"
+  if result=$(fm_pipeline_claim_next "$Q" "code-review" "reviewer-beta" "$STATE" 2>/dev/null); then
+    fail "missing implementer must not claim, got $result"
+  fi
+  pass "claim_next refuses missing implementer identity"
 }
 
 # --- pipeline sweep ----------------------------------------------------------
 
 test_pipeline_sweep_expired() {
-  fm_claim_acquire "$Q" "task-11" "reviewer-alpha" "abc123" "code-review" 1
-  fm_ready_enqueue "$Q" "task-11" "code-review" "abc123"
+  SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  fm_claim_acquire "$Q" "task-11" "reviewer-alpha" "$SHA40" "code-review" 1
+  fm_ready_enqueue "$Q" "task-11" "code-review" "$SHA40"
   sleep 2
   fm_pipeline_sweep "$Q"
   [ ! -f "$Q/task-11.claim" ] || fail "expired claim should be removed after sweep"
@@ -209,10 +279,11 @@ test_current_stage_ready_for_merge() {
 # --- apply verdict + blocked claimer -----------------------------------------
 
 test_apply_verdict_green_advances() {
+  SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   fresh_status "task-av"
-  fm_ready_enqueue "$Q" "task-av" "code-review" "abc123" "code-review,qa" ""
-  fm_claim_acquire "$Q" "task-av" "rev-a" "abc123" "code-review" 60
-  line="verdict: green [sha=abc123] [stage=code-review] [by=rev-a] [findings=0]"
+  fm_ready_enqueue "$Q" "task-av" "code-review" "$SHA40" "code-review,qa" ""
+  fm_claim_acquire "$Q" "task-av" "rev-a" "$SHA40" "code-review" 60
+  line="verdict: green [sha=$SHA40] [stage=code-review] [by=rev-a] [findings=0]"
   echo "$line" >> "$STATE/task-av.status"
   fm_pipeline_apply_verdict "$Q" "$STATE" "task-av" "$line" "rev-a" "code-review,qa" \
     || fail "apply green should succeed"
@@ -222,10 +293,11 @@ test_apply_verdict_green_advances() {
 }
 
 test_apply_verdict_red_returns() {
+  SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   fresh_status "task-ar"
-  fm_ready_enqueue "$Q" "task-ar" "code-review" "abc123"
-  fm_claim_acquire "$Q" "task-ar" "rev-a" "abc123" "code-review" 60
-  line="verdict: red [sha=abc123] [stage=code-review] [by=rev-a] [findings=2]"
+  fm_ready_enqueue "$Q" "task-ar" "code-review" "$SHA40"
+  fm_claim_acquire "$Q" "task-ar" "rev-a" "$SHA40" "code-review" 60
+  line="verdict: red [sha=$SHA40] [stage=code-review] [by=rev-a] [findings=2]"
   fm_pipeline_apply_verdict "$Q" "$STATE" "task-ar" "$line" "rev-a" \
     || fail "apply red should succeed"
   grep -q "returned:" "$STATE/task-ar.status" || fail "should return to implementer"
@@ -233,9 +305,10 @@ test_apply_verdict_red_returns() {
 }
 
 test_blocked_claimer_visible_and_releases() {
+  SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   fresh_status "task-blk"
-  fm_ready_enqueue "$Q" "task-blk" "code-review" "abc123"
-  fm_claim_acquire "$Q" "task-blk" "claimer-x" "abc123" "code-review" 60
+  fm_ready_enqueue "$Q" "task-blk" "code-review" "$SHA40"
+  fm_claim_acquire "$Q" "task-blk" "claimer-x" "$SHA40" "code-review" 60
   echo "blocked: provider refused" > "$STATE/claimer-x.status"
   out=$(fm_pipeline_release_if_claimer_blocked \
     "$Q" "$STATE" "task-blk" "$STATE/claimer-x.status") \
@@ -248,15 +321,24 @@ test_blocked_claimer_visible_and_releases() {
 }
 
 test_quota_dead_claimer_visible() {
+  SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   fresh_status "task-q"
-  fm_ready_enqueue "$Q" "task-q" "qa" "abc123"
-  fm_claim_acquire "$Q" "task-q" "claimer-y" "abc123" "qa" 60
+  fm_ready_enqueue "$Q" "task-q" "qa" "$SHA40"
+  fm_claim_acquire "$Q" "task-q" "claimer-y" "$SHA40" "qa" 60
   echo "limit: dead · class=limit" > "$STATE/claimer-y.status"
   out=$(fm_pipeline_release_if_claimer_blocked \
     "$Q" "$STATE" "task-q" "$STATE/claimer-y.status") \
     || fail "should detect quota death"
   printf '%s' "$out" | grep -q "quota-exhausted" || fail "should label quota-exhausted"
   pass "quota-exhausted claimer is visible as blocked, not silence"
+}
+
+test_reviewer_task_id_stable() {
+  id=$(fm_pipeline_reviewer_task_id "ship-abc" "code-review")
+  [ "$id" = "rvw-ship-abc-cr" ] || fail "got $id"
+  id=$(fm_pipeline_reviewer_task_id "ship-abc" "security-review")
+  [ "$id" = "rvw-ship-abc-sec" ] || fail "got $id"
+  pass "reviewer task id is stable per ticket+stage"
 }
 
 # --- run all tests -----------------------------------------------------------
@@ -271,11 +353,17 @@ test_required_stages_auth_gets_security
 test_required_stages_docs_only
 test_required_stages_code_gets_qa
 test_independent_reviewer_passes
-test_same_harness_reviewer_fails
+test_same_implementer_fails
+test_empty_implementer_fails_closed
+test_empty_reviewer_fails_closed
+test_same_harness_different_agents_allowed
 test_roles_distinct
+test_break_restore_independence_fail_open
+test_claim_next_requires_state_dir
 test_claim_next_picks_available
 test_claim_next_skips_claimed
 test_claim_next_refuses_same_implementer
+test_claim_next_refuses_missing_implementer
 test_pipeline_sweep_expired
 test_current_stage_from_status
 test_current_stage_from_verdict
@@ -284,5 +372,6 @@ test_apply_verdict_green_advances
 test_apply_verdict_red_returns
 test_blocked_claimer_visible_and_releases
 test_quota_dead_claimer_visible
+test_reviewer_task_id_stable
 
-printf '\n1..%d\n' 23
+printf '\n1..%d\n' 30

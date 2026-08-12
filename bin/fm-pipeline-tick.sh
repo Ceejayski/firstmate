@@ -5,16 +5,18 @@
 # orchestrator to notice and move it. A tick does, in order:
 #
 #   1. Sweep expired claims — ticket returns to the ready queue, never lost
-#   2. For each task with a trigger (done: or turn-ended), run observable
+#   2. Refresh live forge heads for tickets with pr= (PR can move under review)
+#   3. For each task with a trigger (done: or turn-ended), run observable
 #      readiness (PR + pr_head). Self-report alone never makes a ticket ready
-#   3. Apply the latest unhandled verdict on tickets
-#   4. Surface blocked or quota-dead claimers as blocked: (never as silence)
+#   4. Apply the latest unhandled verdict on tickets
+#   5. Surface blocked or quota-dead claimers as blocked: (never as silence)
+#   6. Dispatch stage agents: claim + standing-spec brief (+ optional spawn)
 #
-# This script does not spawn agents and does not merge. Stage agents claim via
-# fm_pipeline_claim_next; merge authority stays with firstmate/captain through
-# fm-merge-gate.sh then fm-pr-merge.sh.
+# The watcher runs this on its check cadence so firstmate need not remember.
+# Merge authority stays with firstmate/captain through fm-merge-gate.sh then
+# fm-pr-merge.sh. Post-merge build verification is a separate ship.
 #
-# Usage: fm-pipeline-tick.sh [--state DIR] [--pipeline-dir DIR]
+# Usage: fm-pipeline-tick.sh [--state DIR] [--pipeline-dir DIR] [--no-dispatch]
 # Exit: 0 after a complete tick (actions printed); 2 on usage error.
 set -u
 
@@ -23,6 +25,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PIPELINE_DIR="${FM_PIPELINE_DIR_OVERRIDE:-${FM_HOME}/state/pipeline}"
+DO_DISPATCH=1
 
 # shellcheck source=bin/fm-claim-lib.sh
 . "$SCRIPT_DIR/fm-claim-lib.sh"
@@ -37,12 +40,13 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --state) STATE=$2; shift 2 ;;
     --pipeline-dir) PIPELINE_DIR=$2; shift 2 ;;
+    --no-dispatch) DO_DISPATCH=0; shift ;;
     -h|--help)
-      sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
-      echo "usage: fm-pipeline-tick.sh [--state DIR] [--pipeline-dir DIR]" >&2
+      echo "usage: fm-pipeline-tick.sh [--state DIR] [--pipeline-dir DIR] [--no-dispatch]" >&2
       exit 2
       ;;
   esac
@@ -87,13 +91,29 @@ _fm_tick_already_ready_or_beyond() {
   [ -f "$status" ] || return 1
   line=$(tail -1 "$status" 2>/dev/null || true)
   case "$line" in
-    ready-for-review:*|ready-for-merge:*|returned:*|needs-decision:*) return 0 ;;
+    ready-for-review:*|ready-for-merge:*|returned:*|needs-decision:*|review-dispatched:*) return 0 ;;
   esac
   fm_ready_is_queued "$PIPELINE_DIR" "$task" && return 0
   return 1
 }
 
-# --- 2. Observable readiness for triggered tasks ------------------------------
+# --- 2. Live forge head refresh for PR-bearing tickets ------------------------
+
+for meta in "$STATE"/*.meta; do
+  [ -e "$meta" ] || continue
+  task=$(basename "$meta" .meta)
+  pr=$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$pr" ] || continue
+  if live=$(fm_pipeline_refresh_pr_head "$STATE" "$task" "$PIPELINE_DIR" 2>/dev/null); then
+    recorded=$(fm_ready_meta_pr_head "$meta")
+    # refresh rewrites meta; re-read for comparison is noisy — print when ready marker updated
+    if [ -n "$live" ]; then
+      printf 'tick: HEAD %s %s\n' "$task" "$live"
+    fi
+  fi
+done
+
+# --- 3. Observable readiness for triggered tasks ------------------------------
 
 for meta in "$STATE"/*.meta; do
   [ -e "$meta" ] || continue
@@ -102,7 +122,7 @@ for meta in "$STATE"/*.meta; do
   _fm_tick_already_ready_or_beyond "$STATE" "$task" && continue
   if fm_ready_observables_ok "$STATE" "$task" 2>/dev/null; then
     stage=$(fm_ready_enqueue_from_meta "$STATE" "$PIPELINE_DIR" "$task")
-    sha=$(fm_ready_meta_pr_head "$meta")
+    sha=$(fm_ready_meta_pr_head "$STATE/$task.meta")
     printf 'tick: READY %s %s %s\n' "$task" "$stage" "$sha"
   else
     reason=$(fm_ready_observables_ok "$STATE" "$task" 2>&1 >/dev/null || true)
@@ -110,7 +130,7 @@ for meta in "$STATE"/*.meta; do
   fi
 done
 
-# --- 3. Apply latest unhandled verdict ----------------------------------------
+# --- 4. Apply latest unhandled verdict ----------------------------------------
 
 for status in "$STATE"/*.status; do
   [ -e "$status" ] || continue
@@ -147,7 +167,7 @@ for status in "$STATE"/*.status; do
   fi
 done
 
-# --- 4. Blocked / out-of-quota claimers ---------------------------------------
+# --- 5. Blocked / out-of-quota claimers ---------------------------------------
 
 for claim in "$PIPELINE_DIR"/*.claim; do
   [ -e "$claim" ] || continue
@@ -164,5 +184,19 @@ for claim in "$PIPELINE_DIR"/*.claim; do
     fi
   done
 done
+
+# --- 6. Dispatch stage agents (claim + standing brief [+ spawn]) --------------
+
+if [ "$DO_DISPATCH" -eq 1 ] && [ -x "$SCRIPT_DIR/fm-pipeline-dispatch.sh" ]; then
+  # Default no-spawn inside tick when FM_PIPELINE_AUTO_SPAWN=0; otherwise spawn.
+  dispatch_flags=(--state "$STATE" --pipeline-dir "$PIPELINE_DIR" --max 3)
+  if [ "${FM_PIPELINE_AUTO_SPAWN:-1}" = "0" ]; then
+    dispatch_flags+=(--no-spawn)
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf 'tick: %s\n' "$line"
+  done < <("$SCRIPT_DIR/fm-pipeline-dispatch.sh" "${dispatch_flags[@]}" 2>&1 || true)
+fi
 
 exit 0

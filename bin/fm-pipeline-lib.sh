@@ -33,6 +33,8 @@
 . "$(dirname "${BASH_SOURCE[0]}")/fm-claim-lib.sh"
 # shellcheck source=bin/fm-verdict-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-verdict-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-pr-lib.sh"
 
 # Directory for pipeline state (claim files, ready queue markers).
 # Defaults to $FM_HOME/state/pipeline.
@@ -287,23 +289,31 @@ fm_pipeline_current_stage() {
 
 # Attempt to claim the next available ticket at a given stage.
 # Prints "<task-id> <sha>" on success, or nothing if no ticket is available.
-# Enforces independence: refuses when the claimer matches the implementer.
+# Always enforces independence: state_dir is required. A missing implementer
+# identity, or a claimer that matches the implementer, is skipped (never claimed).
+# Omitting state_dir is a hard error — fail closed, never fail open.
 # $1: pipeline directory
 # $2: stage (code-review, qa, security-review)
 # $3: claimer agent id
-# $4: TTL seconds (optional)
-# $5: state directory for independence check (optional)
+# $4: state directory (required for independence)
+# $5: TTL seconds (optional)
 fm_pipeline_claim_next() {
-  local pipeline_dir=$1 stage=$2 claimer=$3 ttl=${4:-$FM_CLAIM_TTL_DEFAULT}
-  local state_dir=${5:-}
+  local pipeline_dir=$1 stage=$2 claimer=$3 state_dir=${4:-} ttl=${5:-$FM_CLAIM_TTL_DEFAULT}
   local task sha
+
+  if [ -z "$state_dir" ]; then
+    echo "independence: state_dir required for claim_next (refuse fail-open)" >&2
+    return 1
+  fi
+  if [ -z "$claimer" ]; then
+    echo "independence: claimer id required for claim_next" >&2
+    return 1
+  fi
 
   while IFS=' ' read -r task sha; do
     [ -n "$task" ] || continue
-    if [ -n "$state_dir" ]; then
-      if ! fm_pipeline_independent "$state_dir" "$task" "$claimer"; then
-        continue
-      fi
+    if ! fm_pipeline_independent "$state_dir" "$task" "$claimer"; then
+      continue
     fi
     if fm_claim_acquire "$pipeline_dir" "$task" "$claimer" "$sha" "$stage" "$ttl"; then
       printf '%s %s\n' "$task" "$sha"
@@ -337,8 +347,12 @@ fm_pipeline_counts() {
 
 # --- independence enforcement --------------------------------------------------
 
-# Resolve the implementer identity from meta. Prefers implementer= (explicit),
-# then window=, then harness=. Empty if meta is missing.
+# Resolve the durable implementer agent identity from meta.
+# Prefers implementer= (written at spawn; task id of the implementing agent),
+# then window= for pre-implementer= records. Never falls back to harness=:
+# harness names a runtime adapter, not an agent — two distinct agents on the
+# same harness must remain independent.
+# Empty if meta is missing or carries no agent identity.
 # $1: state directory
 # $2: task id
 fm_pipeline_implementer_id() {
@@ -351,13 +365,17 @@ fm_pipeline_implementer_id() {
   [ -n "$id" ] && { printf '%s' "$id"; return 0; }
   id=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$id" ] && { printf '%s' "$id"; return 0; }
-  grep '^harness=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  return 0
 }
 
 # 0 if the implementer and reviewer are different agents. This is the
 # independence guard: the pipeline must never let the same agent that
 # implemented a ticket also review it. Implementer, reviewer and merger stay
 # three different agents.
+#
+# Fail closed: missing implementer identity, missing reviewer id, or a match
+# all refuse. Uncertainty is "not independent" — never allow a self-review
+# because identity could not be resolved.
 # $1: state directory
 # $2: task id
 # $3: reviewer agent id
@@ -365,11 +383,15 @@ fm_pipeline_independent() {
   local state=$1 task=$2 reviewer=$3
   local implementer
 
+  if [ -z "$reviewer" ]; then
+    echo "independence violation: reviewer identity missing" >&2
+    return 1
+  fi
+
   implementer=$(fm_pipeline_implementer_id "$state" "$task")
-  # Missing identity: cannot verify independence. Fail closed for claim paths
-  # that pass state_dir; callers that omit state_dir skip this check.
   if [ -z "$implementer" ]; then
-    return 0
+    echo "independence violation: implementer identity missing for $task — refuse" >&2
+    return 1
   fi
   if [ "$implementer" = "$reviewer" ]; then
     echo "independence violation: implementer $implementer matches reviewer $reviewer" >&2
@@ -378,18 +400,28 @@ fm_pipeline_independent() {
   return 0
 }
 
-# 0 if implementer, reviewer and merger are pairwise distinct when provided.
-# Empty slots are ignored (unknown), non-empty collisions fail.
+# 0 if implementer, reviewer and merger are pairwise distinct.
+# Empty slots refuse: unknown identity cannot prove independence (fail closed).
 # $1: implementer id
 # $2: reviewer id
-# $3: merger id
+# $3: merger id (optional empty only when merger is not yet known; still
+#     requires implementer and reviewer when those roles are in play)
 fm_pipeline_roles_distinct() {
   local impl=$1 rev=$2 mer=$3
-  if [ -n "$impl" ] && [ -n "$rev" ] && [ "$impl" = "$rev" ]; then
+
+  # When a role id is provided empty while others are set, treat empty as
+  # unknown only for the optional merger slot when both impl and rev are set
+  # and mer is intentionally empty (pre-merge review path). Implementer and
+  # reviewer must always be non-empty when checked together.
+  if [ -z "$impl" ]; then
+    echo "independence violation: implementer identity missing" >&2
+    return 1
+  fi
+  if [ -n "$rev" ] && [ "$impl" = "$rev" ]; then
     echo "independence violation: implementer matches reviewer ($impl)" >&2
     return 1
   fi
-  if [ -n "$impl" ] && [ -n "$mer" ] && [ "$impl" = "$mer" ]; then
+  if [ -n "$mer" ] && [ "$impl" = "$mer" ]; then
     echo "independence violation: implementer matches merger ($impl)" >&2
     return 1
   fi
@@ -398,6 +430,110 @@ fm_pipeline_roles_distinct() {
     return 1
   fi
   return 0
+}
+
+# Stable reviewer task id for a ticket+stage claimer. Distinct from the
+# implementer task id so independence compares agent identities, not harnesses.
+# $1: ticket task id
+# $2: stage
+fm_pipeline_reviewer_task_id() {
+  local task=$1 stage=$2
+  local abbrev
+  case "$stage" in
+    code-review) abbrev=cr ;;
+    qa) abbrev=qa ;;
+    security-review) abbrev=sec ;;
+    *) abbrev=$(printf '%s' "$stage" | tr -c 'a-zA-Z0-9' '-' | sed 's/-\+/-/g;s/^-//;s/-$//') ;;
+  esac
+  printf 'rvw-%s-%s' "$task" "$abbrev"
+}
+
+# Refresh pr_head= in meta from the live forge head. Rebinds a ready marker's
+# sha when the PR has moved so claims bind the current head, not a stale one.
+# Prints the live head on success. Returns 1 when the forge cannot be resolved
+# and no valid recorded head remains usable.
+# $1: state directory
+# $2: task id
+# $3: pipeline directory (optional; when set, rebinds ready marker sha)
+fm_pipeline_refresh_pr_head() {
+  local state=$1 task=$2 pipeline_dir=${3:-}
+  local meta="$state/$task.meta"
+  local pr recorded live wt stage required ready_pr
+
+  [ -f "$meta" ] || return 1
+  pr=$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  recorded=$(grep '^pr_head=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+
+  live=
+  if [ -n "$pr" ]; then
+    live=$(fm_pipeline_live_pr_head "$pr" "$wt" 2>/dev/null || true)
+  fi
+
+  if [ -n "$live" ] && fm_pr_head_valid "$live"; then
+    if [ "$live" != "$recorded" ]; then
+      _fm_pipeline_meta_set_pr_head "$meta" "$live"
+      if [ -n "$pipeline_dir" ] && [ -f "$pipeline_dir/$task.ready" ]; then
+        stage=$(fm_ready_field "$pipeline_dir" "$task" stage 2>/dev/null || true)
+        required=$(fm_ready_field "$pipeline_dir" "$task" required 2>/dev/null || true)
+        ready_pr=$(fm_ready_field "$pipeline_dir" "$task" pr 2>/dev/null || true)
+        [ -n "$ready_pr" ] || ready_pr=$pr
+        if [ -n "$stage" ]; then
+          fm_ready_enqueue "$pipeline_dir" "$task" "$stage" "$live" "$required" "$ready_pr"
+          echo "ready-for-review: $stage [sha=$live] [required=$required] [pr=$ready_pr] [head-refreshed=1]" \
+            >> "$state/$task.status"
+        fi
+      fi
+    fi
+    printf '%s' "$live"
+    return 0
+  fi
+
+  if [ -n "$recorded" ] && fm_pr_head_valid "$recorded"; then
+    printf '%s' "$recorded"
+    return 0
+  fi
+  return 1
+}
+
+# Resolve the live forge head for a PR URL. GitHub via gh; empty on failure.
+# $1: PR URL
+# $2: worktree for gh cwd (optional)
+fm_pipeline_live_pr_head() {
+  local url=$1 wt=${2:-}
+  local head="" cwd
+
+  [ -n "$url" ] || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+
+  cwd=${wt:-.}
+  if [ -n "$wt" ] && [ ! -d "$wt" ]; then
+    cwd=.
+  fi
+  head=$(cd "$cwd" && gh pr view "$url" --json headRefOid -q .headRefOid 2>/dev/null) || return 1
+  if fm_pr_head_valid "$head"; then
+    printf '%s' "$head"
+    return 0
+  fi
+  return 1
+}
+
+# Rewrite pr_head= in a meta file, preserving other fields.
+# $1: meta path
+# $2: new head SHA
+_fm_pipeline_meta_set_pr_head() {
+  local meta=$1 head=$2
+  local tmp dir
+  dir=$(dirname "$meta")
+  tmp=$(mktemp "$dir/.fm-meta-prhead.XXXXXX") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      pr_head=*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; return 1; } ;;
+    esac
+  done < "$meta"
+  printf 'pr_head=%s\n' "$head" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f -- "$tmp" "$meta"
 }
 
 # --- blocked claimer visibility -----------------------------------------------
