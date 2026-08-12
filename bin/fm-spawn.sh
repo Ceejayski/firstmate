@@ -302,6 +302,7 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            echo "implementer=$ID"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -1659,9 +1660,14 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # Durable agent identity for the auto-review pipeline independence guard.
+  # Task id is unique per spawn and does not change when harness/window do;
+  # claim_next and the merge gate refuse when this is missing or matches the
+  # claimer (never fail open on uncertainty).
+  echo "implementer=$ID"
   # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
-  # data/fm-backend-design-d7's P1 compatibility contract).
+  # default path's meta stays byte-identical for keys other than implementer=
+  # (absent backend= means tmux; data/fm-backend-design-d7's P1 contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"

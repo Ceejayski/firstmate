@@ -115,6 +115,16 @@ fm_pr_metadata_identity_parse "$META" || exit 1
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 
+# When the forge head is known, record changed_paths= from the real git diff
+# so stage selection has a durable surface before the readiness tick runs.
+# Failure is non-fatal here: ready-check still requires a successful record
+# before enqueue and will block rather than under-review.
+if [ -n "$PR_HEAD" ]; then
+  # shellcheck source=bin/fm-pipeline-lib.sh
+  . "$SCRIPT_DIR/fm-pipeline-lib.sh"
+  fm_pipeline_record_changed_paths "$STATE" "$ID" >/dev/null 2>&1 || true
+fi
+
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1

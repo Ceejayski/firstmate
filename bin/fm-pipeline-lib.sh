@@ -1,0 +1,791 @@
+#!/usr/bin/env bash
+# fm-pipeline-lib.sh - pipeline stage tracking and transition management.
+#
+# Ties claim, verdict, and readiness into one pipeline lifecycle.
+# Harness-agnostic: operates on status files, claim files, and observable
+# repo state. No dependency on what any harness prints or supports.
+#
+# Design decisions (captain amendment, 2026-08-11):
+#
+# SEQUENCE, not parallel. Stages run in order: code-review → qa →
+# security-review → merge agent. Justification: a red at any stage returns the
+# ticket to the implementer, so parallel stages would burn budget on work that
+# may be thrown away, and each stage must bind the same SHA. Cost: end-to-end
+# latency is the sum of stage times, not the max.
+#
+# Required stages are decided by SURFACE TOUCHED, not guesswork:
+#   - code-review: always for ship work
+#   - qa: any non-docs/copy surface
+#   - security-review: money, auth, admin, payment (and close relatives) always;
+#     a pure copy/docs tweak does not get security
+# Every required stage still has its own claim, expiry, and SHA-bound verdict —
+# the same correctness properties, not a looser later-stage variant.
+#
+# The pipeline flow:
+#   implementer finishes -> ready (observables) -> stage N claims -> verdict
+#     green -> next required stage (or ready-for-merge)
+#     red -> returned to implementer with findings; later stages do not run
+#     cannot-verify / needs-decision -> escalation, never the merge gate
+#
+# Usage: . bin/fm-pipeline-lib.sh
+
+# shellcheck source=bin/fm-claim-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-claim-lib.sh"
+# shellcheck source=bin/fm-verdict-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-verdict-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-pr-lib.sh"
+
+# Directory for pipeline state (claim files, ready queue markers).
+# Defaults to $FM_HOME/state/pipeline.
+FM_PIPELINE_DIR_DEFAULT="${FM_HOME:-$HOME/.firstmate}/state/pipeline"
+
+# Canonical ordered review stages. Merge is the post-review gate, not a review.
+FM_PIPELINE_STAGES="code-review qa security-review"
+
+# Path fragments that always require security-review. Match against changed
+# file paths (case-insensitive). Money, auth, admin, payment and close kin.
+FM_PIPELINE_SECURITY_RE='(^|/)(auth|admin|payment|billing|wallet|ledger|stripe|entitlement|money|checkout|invoice|credits?)(/|$|\.)|(^|/)(api|server|routes?)/[^ ]*(auth|admin|pay|bill|wallet|ledger)'
+
+# Paths treated as docs/copy only (no QA, no security by default).
+FM_PIPELINE_DOCS_RE='\.(md|mdx|txt|rst)$|(^|/)(docs|copy|changelog|license)(/|$)'
+
+# --- pipeline directory management --------------------------------------------
+
+# Ensure the pipeline directory exists.
+# $1: pipeline directory (optional; defaults to FM_PIPELINE_DIR_DEFAULT)
+fm_pipeline_init() {
+  local pipeline_dir=${1:-$FM_PIPELINE_DIR_DEFAULT}
+  mkdir -p "$pipeline_dir"
+}
+
+# --- surface-based required stages --------------------------------------------
+
+# Decide the required review stages from a list of changed paths.
+# Prints a comma-separated list in canonical order, e.g.
+#   code-review
+#   code-review,qa
+#   code-review,qa,security-review
+# $1: newline- or space-separated changed paths
+# Fail closed: empty or unknown paths refuse. A missing input must never become
+# a confident generic code-review,qa answer — that made security-review
+# unreachable in production. Callers that observed a successful zero-file diff
+# set required_stages=code-review explicitly rather than calling this with "".
+fm_pipeline_required_stages() {
+  local paths=${1:-}
+  local need_qa=0 need_sec=0 path lower any_path=0 non_docs=0
+
+  if [ -z "$paths" ]; then
+    echo "required_stages: changed paths unknown — refuse generic default" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2086
+  for path in $paths; do
+    [ -n "$path" ] || continue
+    any_path=1
+    lower=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
+    if printf '%s' "$lower" | grep -Eqi "$FM_PIPELINE_SECURITY_RE"; then
+      need_sec=1
+      need_qa=1
+    fi
+    if ! printf '%s' "$lower" | grep -Eqi "$FM_PIPELINE_DOCS_RE"; then
+      non_docs=1
+      need_qa=1
+    fi
+  done
+
+  if [ "$any_path" -eq 0 ]; then
+    echo "required_stages: changed paths unknown — refuse generic default" >&2
+    return 1
+  fi
+
+  if [ "$need_sec" -eq 1 ]; then
+    printf 'code-review,qa,security-review'
+    return 0
+  fi
+  if [ "$need_qa" -eq 1 ] || [ "$non_docs" -eq 1 ]; then
+    printf 'code-review,qa'
+    return 0
+  fi
+  # Pure docs/copy: code-review only.
+  printf 'code-review'
+}
+
+# Resolve the merge-base side for a real branch diff.
+# Prefers origin/<default>, then local main/master.
+# $1: git directory (worktree or project clone)
+# Prints a ref (e.g. origin/main). Returns 1 if none resolve.
+fm_pipeline_default_base_ref() {
+  local gitdir=$1
+  local ref branch
+
+  [ -d "$gitdir" ] || return 1
+  ref=$(git -C "$gitdir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ] && git -C "$gitdir" rev-parse --verify --quiet "${ref}^{commit}" >/dev/null; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$gitdir" rev-parse --verify --quiet "refs/remotes/origin/${branch}^{commit}" >/dev/null; then
+      printf 'origin/%s' "$branch"
+      return 0
+    fi
+    if git -C "$gitdir" rev-parse --verify --quiet "refs/heads/${branch}^{commit}" >/dev/null; then
+      printf '%s' "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Compute changed paths from a real git diff: base...head (merge-base triple-dot).
+# Does not trust worker self-report. Prints space-separated paths (may be empty
+# when the diff is empty but still resolvable). Returns 1 when the diff cannot
+# be determined at all.
+# $1: git directory
+# $2: head SHA or ref (the PR tip)
+# $3: optional base ref (default: fm_pipeline_default_base_ref)
+fm_pipeline_diff_paths() {
+  local gitdir=$1 head=$2 base=${3:-}
+  local paths
+
+  [ -n "$gitdir" ] && [ -d "$gitdir" ] || return 1
+  [ -n "$head" ] || return 1
+  git -C "$gitdir" cat-file -e "${head}^{commit}" 2>/dev/null || return 1
+
+  if [ -z "$base" ]; then
+    base=$(fm_pipeline_default_base_ref "$gitdir") || return 1
+  fi
+  git -C "$gitdir" rev-parse --verify --quiet "${base}^{commit}" >/dev/null || return 1
+
+  # Triple-dot matches fm-review-diff: merge-base of base and head ... head.
+  if ! paths=$(git -C "$gitdir" diff --name-only "${base}...${head}" 2>/dev/null); then
+    return 1
+  fi
+  # Collapse to a single space-separated line for meta storage.
+  paths=$(printf '%s\n' "$paths" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  printf '%s' "$paths"
+  return 0
+}
+
+# Rewrite selected key=value fields in a meta file, preserving other lines.
+# $1: meta path
+# remaining args: key=value pairs to set (empty value after = is allowed)
+_fm_pipeline_meta_set_fields() {
+  local meta=$1
+  shift
+  local tmp dir line key strip_keys arg
+
+  [ -f "$meta" ] || return 1
+  dir=$(dirname "$meta")
+  tmp=$(mktemp "$dir/.fm-meta-fields.XXXXXX") || return 1
+
+  strip_keys=
+  for arg in "$@"; do
+    key=${arg%%=*}
+    strip_keys="${strip_keys} ${key} "
+  done
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    key=${line%%=*}
+    case "$strip_keys" in
+      *" ${key} "*) ;;
+      *)
+        printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; return 1; }
+        ;;
+    esac
+  done < "$meta"
+
+  for arg in "$@"; do
+    printf '%s\n' "$arg" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  done
+  mv -f -- "$tmp" "$meta"
+}
+
+# Record changed_paths= and required_stages= into task meta from a real git
+# diff of the pushed PR head against its merge base. Recomputes whenever the
+# head moves (changed_paths_sha tracks the head that produced the paths).
+# Never trusts a worker self-report of paths.
+# $1: state directory
+# $2: task id
+# Prints the path list on success. Returns 1 when paths cannot be determined
+# (caller must block the ticket, not fall back to a generic stage set).
+fm_pipeline_record_changed_paths() {
+  local state=$1 task=$2
+  local meta="$state/$task.meta"
+  local wt proj head gitdir paths required
+
+  [ -f "$meta" ] || return 1
+  head=$(grep '^pr_head=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ -z "$head" ] || ! fm_pr_head_valid "$head"; then
+    echo "changed_paths: no valid pr_head for $task" >&2
+    return 1
+  fi
+
+  wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  proj=$(grep '^project=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+
+  gitdir=
+  if [ -n "$wt" ] && [ -d "$wt" ] \
+    && git -C "$wt" cat-file -e "${head}^{commit}" 2>/dev/null; then
+    gitdir=$wt
+  elif [ -n "$proj" ] && [ -d "$proj" ] \
+    && git -C "$proj" cat-file -e "${head}^{commit}" 2>/dev/null; then
+    gitdir=$proj
+  else
+    echo "changed_paths: no git object for $head in worktree/project for $task" >&2
+    return 1
+  fi
+
+  if ! paths=$(fm_pipeline_diff_paths "$gitdir" "$head"); then
+    echo "changed_paths: could not diff $head against default base for $task" >&2
+    return 1
+  fi
+
+  if [ -z "$paths" ]; then
+    # Diff resolved and is empty: known surface, not unknown. Code-review only.
+    required=code-review
+  else
+    if ! required=$(fm_pipeline_required_stages "$paths"); then
+      return 1
+    fi
+  fi
+
+  _fm_pipeline_meta_set_fields "$meta" \
+    "changed_paths=$paths" \
+    "required_stages=$required" \
+    "changed_paths_sha=$head" || return 1
+
+  printf '%s' "$paths"
+  return 0
+}
+
+# 0 if stage is in the required comma-list.
+# $1: stage
+# $2: required comma-list
+fm_pipeline_stage_required() {
+  local stage=$1 required=$2
+  case ",${required}," in
+    *",${stage},"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Next required stage after current, or "merge" when no further review stage is
+# required. Unknown current with non-empty required yields the first required.
+# $1: current stage (code-review|qa|security-review|"" for entry)
+# $2: required comma-list
+fm_pipeline_next_required() {
+  local current=$1 required=$2
+  local s seen_current=0
+
+  if [ -z "$current" ]; then
+    for s in $FM_PIPELINE_STAGES; do
+      if fm_pipeline_stage_required "$s" "$required"; then
+        printf '%s' "$s"
+        return 0
+      fi
+    done
+    printf 'merge'
+    return 0
+  fi
+
+  for s in $FM_PIPELINE_STAGES; do
+    if [ "$s" = "$current" ]; then
+      seen_current=1
+      continue
+    fi
+    if [ "$seen_current" -eq 1 ] && fm_pipeline_stage_required "$s" "$required"; then
+      printf '%s' "$s"
+      return 0
+    fi
+  done
+  printf 'merge'
+}
+
+# First required stage for a fresh ticket.
+# $1: required comma-list
+fm_pipeline_first_required() {
+  fm_pipeline_next_required "" "$1"
+}
+
+# --- stage transitions --------------------------------------------------------
+
+# Advance a ticket to the next required stage after a green verdict.
+# Dequeues from the current stage, enqueues for the next required stage.
+# If the next stage is "merge", appends "ready-for-merge" to the status file.
+# $1: pipeline directory
+# $2: task id
+# $3: current stage
+# $4: commit SHA
+# $5: required stages comma-list (optional; read from ready marker, else all three)
+# $6: state directory for status appends (optional; defaults to $FM_HOME/state)
+# $7: PR URL to preserve on the next ready marker (optional)
+fm_pipeline_advance() {
+  local pipeline_dir=$1 task=$2 current_stage=$3 sha=$4
+  local required=${5:-} state_dir=${6:-} pr=${7:-}
+  local next_stage status_dir
+
+  if [ -z "$required" ]; then
+    required=$(fm_ready_field "$pipeline_dir" "$task" required 2>/dev/null || true)
+  fi
+  if [ -z "$required" ]; then
+    required="code-review,qa,security-review"
+  fi
+  if [ -z "$pr" ]; then
+    pr=$(fm_ready_field "$pipeline_dir" "$task" pr 2>/dev/null || true)
+  fi
+
+  next_stage=$(fm_pipeline_next_required "$current_stage" "$required")
+
+  fm_ready_dequeue "$pipeline_dir" "$task"
+
+  status_dir="${state_dir:-${FM_HOME:-$HOME/.firstmate}/state}"
+
+  if [ "$next_stage" = merge ]; then
+    echo "ready-for-merge: required stages passed [sha=$sha] [required=$required]" \
+      >> "$status_dir/$task.status"
+    return 0
+  fi
+
+  fm_ready_enqueue "$pipeline_dir" "$task" "$next_stage" "$sha" "$required" "$pr"
+  echo "ready-for-review: $next_stage [sha=$sha] [required=$required]" \
+    >> "$status_dir/$task.status"
+
+  return 0
+}
+
+# Return a ticket to the implementer after a red verdict.
+# Removes from all ready queues, appends "returned: <stage> red" to the status.
+# Later stages must not run on this stale work.
+# $1: pipeline directory
+# $2: task id
+# $3: stage that returned red
+# $4: findings summary (optional)
+# $5: state directory (optional)
+fm_pipeline_return() {
+  local pipeline_dir=$1 task=$2 stage=$3 findings=${4:-} state_dir=${5:-}
+  local status="${state_dir:-${FM_HOME:-$HOME/.firstmate}/state}/$task.status"
+  local holder
+
+  fm_ready_dequeue "$pipeline_dir" "$task"
+
+  holder=$(fm_claim_holder "$pipeline_dir" "$task")
+  if [ -n "$holder" ]; then
+    fm_claim_release "$pipeline_dir" "$task" "$holder" 2>/dev/null || true
+  fi
+
+  local line="returned: $stage returned red"
+  [ -n "$findings" ] && line="$line [findings=$findings]"
+  echo "$line" >> "$status"
+}
+
+# Escalate cannot-verify or open ask-user; never through the merge gate.
+# $1: pipeline directory
+# $2: task id
+# $3: reason summary
+# $4: state directory (optional)
+fm_pipeline_escalate() {
+  local pipeline_dir=$1 task=$2 reason=$3 state_dir=${4:-}
+  local status="${state_dir:-${FM_HOME:-$HOME/.firstmate}/state}/$task.status"
+  local holder
+
+  fm_ready_dequeue "$pipeline_dir" "$task"
+  holder=$(fm_claim_holder "$pipeline_dir" "$task")
+  if [ -n "$holder" ]; then
+    fm_claim_release "$pipeline_dir" "$task" "$holder" 2>/dev/null || true
+  fi
+  echo "needs-decision: pipeline escalate: $reason" >> "$status"
+}
+
+# --- pipeline status query ----------------------------------------------------
+
+# What stage is a ticket currently in? Reads from the most recent
+# ready-for-review, ready-for-merge, returned, or verdict line.
+# Prints the stage name, or empty if not in the pipeline.
+# $1: state directory
+# $2: task id
+fm_pipeline_current_stage() {
+  local state=$1 task=$2
+  local status="$state/$task.status"
+  local line stage
+
+  [ -f "$status" ] || return 0
+
+  while IFS= read -r line; do
+    case "$line" in
+      *ready-for-review:*)
+        stage=$(printf '%s' "$line" | sed -n 's/.*ready-for-review: \([^ ]*\).*/\1/p')
+        [ -n "$stage" ] && { printf '%s' "$stage"; return 0; }
+        ;;
+      *ready-for-merge:*)
+        printf 'merge'
+        return 0
+        ;;
+      *returned:*)
+        printf 'returned'
+        return 0
+        ;;
+      *verdict:*)
+        stage=$(printf '%s' "$line" | grep -o '\[stage=[^]]*\]' | sed 's/\[stage=//;s/\]//')
+        [ -n "$stage" ] && { printf '%s' "$stage"; return 0; }
+        ;;
+    esac
+  done < <(tail -r "$status" 2>/dev/null || tail -100 "$status" | cat -n | sort -rn | cut -f2-)
+
+  return 0
+}
+
+# --- pipeline claim and review -------------------------------------------------
+
+# Attempt to claim the next available ticket at a given stage.
+# Prints "<task-id> <sha>" on success, or nothing if no ticket is available.
+# Always enforces independence: state_dir is required. A missing implementer
+# identity, or a claimer that matches the implementer, is skipped (never claimed).
+# Omitting state_dir is a hard error — fail closed, never fail open.
+# $1: pipeline directory
+# $2: stage (code-review, qa, security-review)
+# $3: claimer agent id
+# $4: state directory (required for independence)
+# $5: TTL seconds (optional)
+fm_pipeline_claim_next() {
+  local pipeline_dir=$1 stage=$2 claimer=$3 state_dir=${4:-} ttl=${5:-$FM_CLAIM_TTL_DEFAULT}
+  local task sha
+
+  if [ -z "$state_dir" ]; then
+    echo "independence: state_dir required for claim_next (refuse fail-open)" >&2
+    return 1
+  fi
+  if [ -z "$claimer" ]; then
+    echo "independence: claimer id required for claim_next" >&2
+    return 1
+  fi
+
+  while IFS=' ' read -r task sha; do
+    [ -n "$task" ] || continue
+    if ! fm_pipeline_independent "$state_dir" "$task" "$claimer"; then
+      continue
+    fi
+    if fm_claim_acquire "$pipeline_dir" "$task" "$claimer" "$sha" "$stage" "$ttl"; then
+      printf '%s %s\n' "$task" "$sha"
+      return 0
+    fi
+  done < <(fm_ready_list "$pipeline_dir" "$stage")
+
+  return 1
+}
+
+# --- pipeline health ----------------------------------------------------------
+
+# Sweep the pipeline for expired claims and return them to the ready queue.
+# An expired claim must never lose the ticket — the ready marker stays.
+# $1: pipeline directory
+fm_pipeline_sweep() {
+  local pipeline_dir=$1
+  fm_claim_sweep "$pipeline_dir"
+}
+
+# Count tickets at each stage.
+# Prints "stage:<count>" lines.
+# $1: pipeline directory
+fm_pipeline_counts() {
+  local pipeline_dir=$1 stage count
+  for stage in $FM_PIPELINE_STAGES; do
+    count=$(fm_ready_list "$pipeline_dir" "$stage" | wc -l | tr -d ' ')
+    printf '%s:%s\n' "$stage" "$count"
+  done
+}
+
+# --- independence enforcement --------------------------------------------------
+
+# Resolve the durable implementer agent identity from meta.
+# Prefers implementer= (written at spawn; task id of the implementing agent),
+# then window= for pre-implementer= records. Never falls back to harness=:
+# harness names a runtime adapter, not an agent — two distinct agents on the
+# same harness must remain independent.
+# Empty if meta is missing or carries no agent identity.
+# $1: state directory
+# $2: task id
+fm_pipeline_implementer_id() {
+  local state=$1 task=$2
+  local meta="$state/$task.meta"
+  local id
+
+  [ -f "$meta" ] || return 0
+  id=$(grep '^implementer=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$id" ] && { printf '%s' "$id"; return 0; }
+  id=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$id" ] && { printf '%s' "$id"; return 0; }
+  return 0
+}
+
+# 0 if the implementer and reviewer are different agents. This is the
+# independence guard: the pipeline must never let the same agent that
+# implemented a ticket also review it. Implementer, reviewer and merger stay
+# three different agents.
+#
+# Fail closed: missing implementer identity, missing reviewer id, or a match
+# all refuse. Uncertainty is "not independent" — never allow a self-review
+# because identity could not be resolved.
+# $1: state directory
+# $2: task id
+# $3: reviewer agent id
+fm_pipeline_independent() {
+  local state=$1 task=$2 reviewer=$3
+  local implementer
+
+  if [ -z "$reviewer" ]; then
+    echo "independence violation: reviewer identity missing" >&2
+    return 1
+  fi
+
+  implementer=$(fm_pipeline_implementer_id "$state" "$task")
+  if [ -z "$implementer" ]; then
+    echo "independence violation: implementer identity missing for $task — refuse" >&2
+    return 1
+  fi
+  if [ "$implementer" = "$reviewer" ]; then
+    echo "independence violation: implementer $implementer matches reviewer $reviewer" >&2
+    return 1
+  fi
+  return 0
+}
+
+# 0 if implementer, reviewer and merger are pairwise distinct.
+# Empty slots refuse: unknown identity cannot prove independence (fail closed).
+# $1: implementer id
+# $2: reviewer id
+# $3: merger id (optional empty only when merger is not yet known; still
+#     requires implementer and reviewer when those roles are in play)
+fm_pipeline_roles_distinct() {
+  local impl=$1 rev=$2 mer=$3
+
+  # When a role id is provided empty while others are set, treat empty as
+  # unknown only for the optional merger slot when both impl and rev are set
+  # and mer is intentionally empty (pre-merge review path). Implementer and
+  # reviewer must always be non-empty when checked together.
+  if [ -z "$impl" ]; then
+    echo "independence violation: implementer identity missing" >&2
+    return 1
+  fi
+  if [ -n "$rev" ] && [ "$impl" = "$rev" ]; then
+    echo "independence violation: implementer matches reviewer ($impl)" >&2
+    return 1
+  fi
+  if [ -n "$mer" ] && [ "$impl" = "$mer" ]; then
+    echo "independence violation: implementer matches merger ($impl)" >&2
+    return 1
+  fi
+  if [ -n "$rev" ] && [ -n "$mer" ] && [ "$rev" = "$mer" ]; then
+    echo "independence violation: reviewer matches merger ($rev)" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Stable reviewer task id for a ticket+stage claimer. Distinct from the
+# implementer task id so independence compares agent identities, not harnesses.
+# $1: ticket task id
+# $2: stage
+fm_pipeline_reviewer_task_id() {
+  local task=$1 stage=$2
+  local abbrev
+  case "$stage" in
+    code-review) abbrev=cr ;;
+    qa) abbrev=qa ;;
+    security-review) abbrev=sec ;;
+    *) abbrev=$(printf '%s' "$stage" | tr -c 'a-zA-Z0-9' '-' | sed 's/-\+/-/g;s/^-//;s/-$//') ;;
+  esac
+  printf 'rvw-%s-%s' "$task" "$abbrev"
+}
+
+# Refresh pr_head= in meta from the live forge head. Rebinds a ready marker's
+# sha when the PR has moved so claims bind the current head, not a stale one.
+# When the head moves, recomputes changed_paths= / required_stages= from the
+# real git diff so stage selection cannot keep a stale surface.
+# Prints the live head on success. Returns 1 when the forge cannot be resolved
+# and no valid recorded head remains usable.
+# $1: state directory
+# $2: task id
+# $3: pipeline directory (optional; when set, rebinds ready marker sha)
+fm_pipeline_refresh_pr_head() {
+  local state=$1 task=$2 pipeline_dir=${3:-}
+  local meta="$state/$task.meta"
+  local pr recorded live wt stage required ready_pr paths_sha
+
+  [ -f "$meta" ] || return 1
+  pr=$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  recorded=$(grep '^pr_head=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+
+  live=
+  if [ -n "$pr" ]; then
+    live=$(fm_pipeline_live_pr_head "$pr" "$wt" 2>/dev/null || true)
+  fi
+
+  if [ -n "$live" ] && fm_pr_head_valid "$live"; then
+    if [ "$live" != "$recorded" ]; then
+      _fm_pipeline_meta_set_pr_head "$meta" "$live"
+    fi
+    # Recompute paths whenever head moved or paths were never bound to this head.
+    paths_sha=$(grep '^changed_paths_sha=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    if [ "$paths_sha" != "$live" ]; then
+      if ! fm_pipeline_record_changed_paths "$state" "$task" >/dev/null; then
+        echo "blocked: cannot determine changed paths after head refresh [sha=$live]" \
+          >> "$state/$task.status"
+        # Still return the live head so callers see the move; stage enqueue
+        # refuses without paths rather than greening a weaker stage set.
+      fi
+    fi
+    if [ -n "$pipeline_dir" ] && [ -f "$pipeline_dir/$task.ready" ]; then
+      stage=$(fm_ready_field "$pipeline_dir" "$task" stage 2>/dev/null || true)
+      required=$(grep '^required_stages=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      [ -n "$required" ] || required=$(fm_ready_field "$pipeline_dir" "$task" required 2>/dev/null || true)
+      ready_pr=$(fm_ready_field "$pipeline_dir" "$task" pr 2>/dev/null || true)
+      [ -n "$ready_pr" ] || ready_pr=$pr
+      if [ -n "$stage" ] && [ -n "$required" ]; then
+        # When surface grew (e.g. money path added), restart from first required
+        # so security-review cannot be skipped on a mid-flight code-review claim.
+        if ! fm_pipeline_stage_required "$stage" "$required"; then
+          stage=$(fm_pipeline_first_required "$required")
+        fi
+        fm_ready_enqueue "$pipeline_dir" "$task" "$stage" "$live" "$required" "$ready_pr"
+        if [ "$live" != "$recorded" ]; then
+          echo "ready-for-review: $stage [sha=$live] [required=$required] [pr=$ready_pr] [head-refreshed=1]" \
+            >> "$state/$task.status"
+        fi
+      fi
+    fi
+    printf '%s' "$live"
+    return 0
+  fi
+
+  if [ -n "$recorded" ] && fm_pr_head_valid "$recorded"; then
+    printf '%s' "$recorded"
+    return 0
+  fi
+  return 1
+}
+
+# Resolve the live forge head for a PR URL. GitHub via gh; empty on failure.
+# $1: PR URL
+# $2: worktree for gh cwd (optional)
+fm_pipeline_live_pr_head() {
+  local url=$1 wt=${2:-}
+  local head="" cwd
+
+  [ -n "$url" ] || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+
+  cwd=${wt:-.}
+  if [ -n "$wt" ] && [ ! -d "$wt" ]; then
+    cwd=.
+  fi
+  head=$(cd "$cwd" && gh pr view "$url" --json headRefOid -q .headRefOid 2>/dev/null) || return 1
+  if fm_pr_head_valid "$head"; then
+    printf '%s' "$head"
+    return 0
+  fi
+  return 1
+}
+
+# Rewrite pr_head= in a meta file, preserving other fields.
+# $1: meta path
+# $2: new head SHA
+_fm_pipeline_meta_set_pr_head() {
+  local meta=$1 head=$2
+  _fm_pipeline_meta_set_fields "$meta" "pr_head=$head"
+}
+
+# --- blocked claimer visibility -----------------------------------------------
+
+# Inspect an active claimer's status for blocked/quota death. If the claimer is
+# visibly blocked or out of quota, release the claim (ticket returns to queue)
+# and append a blocked: line so silence is never mistaken for progress.
+# Prints "BLOCKED <task> <claimer> <reason>" when it acts.
+# $1: pipeline directory
+# $2: state directory
+# $3: task id
+# $4: claimer status file path (or a status directory + claimer id convention)
+fm_pipeline_release_if_claimer_blocked() {
+  local pipeline_dir=$1 state=$2 task=$3 claimer_status=$4
+  local holder reason line
+
+  holder=$(fm_claim_holder "$pipeline_dir" "$task")
+  [ -n "$holder" ] || return 1
+  [ -f "$claimer_status" ] || return 1
+
+  reason=
+  while IFS= read -r line; do
+    case "$line" in
+      blocked:*)
+        reason="blocked"
+        break
+        ;;
+      *'limit: dead'*)
+        reason="quota-exhausted"
+        break
+        ;;
+    esac
+  done < <(tail -r "$claimer_status" 2>/dev/null || tail -50 "$claimer_status")
+
+  # Also accept a trailing limit: line written by fm-limit-sense style probes.
+  if [ -z "$reason" ]; then
+    line=$(tail -1 "$claimer_status" 2>/dev/null || true)
+    case "$line" in
+      blocked:*) reason="blocked" ;;
+      *'limit: dead'*) reason="quota-exhausted" ;;
+    esac
+  fi
+
+  [ -n "$reason" ] || return 1
+
+  fm_claim_release "$pipeline_dir" "$task" "$holder" 2>/dev/null || true
+  echo "blocked: pipeline claimer $holder $reason on $task — ticket returned to queue" \
+    >> "$state/$task.status"
+  printf 'BLOCKED %s %s %s\n' "$task" "$holder" "$reason"
+  return 0
+}
+
+# Apply a verdict that was just appended: green advances, red returns,
+# cannot-verify escalates. Releases the claim on success path.
+# $1: pipeline directory
+# $2: state directory
+# $3: task id
+# $4: verdict line
+# $5: claimer that must release (optional; defaults to verdict by=)
+# $6: required stages (optional)
+fm_pipeline_apply_verdict() {
+  local pipeline_dir=$1 state=$2 task=$3 line=$4 claimer=${5:-} required=${6:-}
+  local outcome stage sha holder
+
+  fm_verdict_is_valid "$line" || return 1
+  outcome=$(fm_verdict_outcome "$line")
+  stage=$(fm_verdict_stage "$line")
+  sha=$(fm_verdict_sha "$line")
+  [ -n "$claimer" ] || claimer=$(fm_verdict_reviewer "$line")
+
+  holder=$(fm_claim_holder "$pipeline_dir" "$task")
+  if [ -n "$holder" ] && [ -n "$claimer" ]; then
+    fm_claim_release "$pipeline_dir" "$task" "$claimer" 2>/dev/null || true
+  fi
+
+  case "$outcome" in
+    green)
+      fm_pipeline_advance "$pipeline_dir" "$task" "$stage" "$sha" "$required" "$state"
+      ;;
+    red)
+      fm_pipeline_return "$pipeline_dir" "$task" "$stage" \
+        "$(fm_verdict_findings "$line")" "$state"
+      ;;
+    cannot-verify)
+      fm_pipeline_escalate "$pipeline_dir" "$task" \
+        "cannot-verify at $stage sha=$sha" "$state"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
