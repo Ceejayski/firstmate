@@ -3321,6 +3321,70 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_prepared_poll_survives_pipeline_lib_resource() {
+  local dir state
+  dir=$(make_case prepared-poll-resource)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+    || fail "could not prepare poll"
+  [ -n "$FM_PR_POLL_DATA_TMP" ] || fail "DATA_TMP empty after prepare"
+  [ -n "$FM_PR_POLL_CHECK_TMP" ] || fail "CHECK_TMP empty after prepare"
+  [ -n "$FM_PR_POLL_REG_TMP" ] || fail "REG_TMP empty after prepare"
+  [ -n "$FM_PR_POLL_DATA_DEST" ] || fail "DATA_DEST empty after prepare"
+  [ -n "$FM_PR_POLL_STATE_DEVICE" ] || fail "STATE_DEVICE empty after prepare"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-pipeline-lib.sh"
+  [ -n "$FM_PR_POLL_DATA_TMP" ] || fail "re-sourcing fm-pipeline-lib.sh wiped FM_PR_POLL_DATA_TMP"
+  [ -n "$FM_PR_POLL_CHECK_TMP" ] || fail "re-sourcing fm-pipeline-lib.sh wiped FM_PR_POLL_CHECK_TMP"
+  [ -n "$FM_PR_POLL_REG_TMP" ] || fail "re-sourcing fm-pipeline-lib.sh wiped FM_PR_POLL_REG_TMP"
+  [ -n "$FM_PR_POLL_DATA_DEST" ] || fail "re-sourcing fm-pipeline-lib.sh wiped FM_PR_POLL_DATA_DEST"
+  [ -n "$FM_PR_POLL_STATE_DEVICE" ] || fail "re-sourcing fm-pipeline-lib.sh wiped FM_PR_POLL_STATE_DEVICE"
+  [ -n "$FM_PR_POLL_EXPECT_ID" ] || fail "re-sourcing fm-pipeline-lib.sh wiped FM_PR_POLL_EXPECT_ID"
+  fm_pr_poll_publish_prepared || fail "publish failed after fm-pipeline-lib.sh re-source"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published poll artifacts invalid after re-source publish"
+  pass "prepared poll publication survives fm-pipeline-lib.sh re-source"
+}
+
+test_pr_check_arms_with_worktree_pipeline_source() {
+  local dir expected rc
+  dir=$(make_case pr-check-pipeline-source)
+  write_task_meta "$dir"
+  expected=0123456789abcdef0123456789abcdef01234567
+  FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "pr-check failed when worktree triggers pipeline-lib source"
+  grep -qxF 'armed: state/task-a.check.sh' "$dir/stdout" \
+    || fail "pr-check did not print armed: after pipeline-lib source between prepare and publish"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "published poll artifacts invalid after pr-check with pipeline source"
+  pass "fm-pr-check.sh arms poll when worktree triggers fm-pipeline-lib.sh source"
+}
+
+test_metadata_parse_accepts_pipeline_fields_after_pr_head() {
+  local dir meta
+  dir=$(make_case meta-pipeline-fields)
+  meta="$dir/home/state/task-a.meta"
+  fm_write_meta "$meta" \
+    "window=fm-task-a" \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/o/r/pull/1" \
+    "pr_head=0123456789abcdef0123456789abcdef01234567" \
+    "changed_paths=src/foo.ts src/bar.ts" \
+    "required_stages=code-review,qa" \
+    "changed_paths_sha=0123456789abcdef0123456789abcdef01234567"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "metadata parse rejected pipeline fields after pr_head="
+  [ "$FM_PR_META_PROVIDER" = github ] || fail "parser lost provider after pipeline fields"
+  [ "$FM_PR_META_URL" = "https://github.com/o/r/pull/1" ] || fail "parser lost URL after pipeline fields"
+  [ "$FM_PR_META_NUMBER" = 1 ] || fail "parser lost number after pipeline fields"
+  pass "metadata identity parse accepts changed_paths, required_stages, changed_paths_sha after pr_head="
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3357,3 +3421,6 @@ test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_prepared_poll_survives_pipeline_lib_resource
+test_pr_check_arms_with_worktree_pipeline_source
+test_metadata_parse_accepts_pipeline_fields_after_pr_head
