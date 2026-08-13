@@ -3362,6 +3362,29 @@ test_pr_check_arms_with_worktree_pipeline_source() {
   pass "fm-pr-check.sh arms poll when worktree triggers fm-pipeline-lib.sh source"
 }
 
+test_metadata_parse_accepts_pipeline_fields_after_pr_head() {
+  local dir meta
+  dir=$(make_case meta-pipeline-fields)
+  meta="$dir/home/state/task-a.meta"
+  fm_write_meta "$meta" \
+    "window=fm-task-a" \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/o/r/pull/1" \
+    "pr_head=0123456789abcdef0123456789abcdef01234567" \
+    "changed_paths=src/foo.ts src/bar.ts" \
+    "required_stages=code-review,qa" \
+    "changed_paths_sha=0123456789abcdef0123456789abcdef01234567"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "metadata parse rejected pipeline fields after pr_head="
+  [ "$FM_PR_META_PROVIDER" = github ] || fail "parser lost provider after pipeline fields"
+  [ "$FM_PR_META_URL" = "https://github.com/o/r/pull/1" ] || fail "parser lost URL after pipeline fields"
+  [ "$FM_PR_META_NUMBER" = 1 ] || fail "parser lost number after pipeline fields"
+  pass "metadata identity parse accepts changed_paths, required_stages, changed_paths_sha after pr_head="
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3400,3 +3423,4 @@ test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
 test_prepared_poll_survives_pipeline_lib_resource
 test_pr_check_arms_with_worktree_pipeline_source
+test_metadata_parse_accepts_pipeline_fields_after_pr_head
